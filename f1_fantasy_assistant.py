@@ -9,7 +9,7 @@ MY_TEAM_FILE = "my_team.csv"
 # Define the expected metadata columns in asset_data.csv
 # All other columns will be treated as GP points columns
 METADATA_COLUMNS = ["ID", "Name", "Type", "Constructor", "Price", "Active"]
-DEFAULT_FREE_TRANSFERS = 1  # Standard free transfers per week, can be adjusted
+DEFAULT_FREE_TRANSFERS = 2  # Standard free transfers per week, can be adjusted
 
 
 def load_and_process_data(asset_file_path, team_file_path):
@@ -202,7 +202,7 @@ def display_team_and_budget_info(team_df, initial_budget, budget_warning_message
                 "WARNING: Team composition might be invalid (expected 5 Drivers, 2 Constructors)."
             )
 
-    return dynamic_budget
+    return dynamic_budget, team_current_value
 
 
 def identify_mandatory_transfers(team_df):
@@ -229,37 +229,221 @@ def identify_mandatory_transfers(team_df):
     return mandatory_transfers_df
 
 
-# --- Main Execution ---
-def main():
-    """Main function to execute the F1 Fantasy Assistant."""
+def suggest_swaps(all_assets_df, my_team_df, mandatory_transfers_df, 
+                  dynamic_budget, current_team_value, 
+                  num_total_transfers_allowed, num_mandatory_transfers):
+    """
+    Suggests swaps, prioritizing mandatory ones, then looking for discretionary improvements
+    using corrected budget logic.
+    """
+    suggestions = {"mandatory": [], "discretionary": []}
+    
+    owned_ids = list(my_team_df['ID'])
+    available_for_purchase_df = all_assets_df[
+        (all_assets_df['Active']) & (~all_assets_df['ID'].isin(owned_ids))
+    ].copy()
+
+    budget_headroom = dynamic_budget - current_team_value
+
+    # --- 1. Handle Mandatory Transfers ---
+    if num_mandatory_transfers > 0:
+        print("\n--- Suggestions for Mandatory Replacements ---")
+        for index, asset_to_sell in mandatory_transfers_df.iterrows():
+            # ... (logic for finding mandatory replacements remains the same) ...
+            sell_id = asset_to_sell['ID']
+            sell_name = asset_to_sell['Name']
+            sell_price = asset_to_sell['Price']
+            sell_type = asset_to_sell['Type']
+            
+            max_buy_price = sell_price + budget_headroom 
+            
+            potential_buys = available_for_purchase_df[
+                (available_for_purchase_df['Type'] == sell_type) &
+                (available_for_purchase_df['Price'] <= max_buy_price)
+            ].sort_values(by='Avg_Points_Last_3_Races', ascending=False)
+            
+            if not potential_buys.empty:
+                suggestions['mandatory'].append({
+                    "sell": asset_to_sell,
+                    "options": potential_buys.head(5) 
+                })
+            else:
+                suggestions['mandatory'].append({
+                    "sell": asset_to_sell,
+                    "options": pd.DataFrame(),
+                    "message": f"No suitable replacements found for {sell_name} (max price: ${max_buy_price:.2f}M)."
+                })
+        # Pass dynamic_budget to display_suggestions
+        display_suggestions(suggestions['mandatory'], "Mandatory Replacements", dynamic_budget)
+
+
+    # --- 2. Handle Discretionary Single Swaps ---
+    num_discretionary_transfers_available = num_total_transfers_allowed - num_mandatory_transfers
+    if num_discretionary_transfers_available > 0:
+        print(f"\n--- Suggestions for up to {num_discretionary_transfers_available} Discretionary Single Swap(s) ---")
+        
+        active_team_members_to_sell = my_team_df[my_team_df['Active']].copy()
+        possible_discretionary_swaps = []
+
+        for index, asset_to_sell in active_team_members_to_sell.iterrows():
+            # ... (logic for finding potential buys remains the same) ...
+            sell_id = asset_to_sell['ID']
+            sell_name = asset_to_sell['Name']
+            sell_price = asset_to_sell['Price']
+            sell_type = asset_to_sell['Type']
+            sell_avg_points = asset_to_sell['Avg_Points_Last_3_Races']
+            
+            max_buy_price = sell_price + budget_headroom
+
+            potential_buys = available_for_purchase_df[
+                (available_for_purchase_df['Type'] == sell_type) &
+                (available_for_purchase_df['Price'] <= max_buy_price) & 
+                (available_for_purchase_df['ID'] != sell_id) 
+            ].copy()
+            
+            if not potential_buys.empty:
+                potential_buys['Improvement_Score_Avg3'] = potential_buys['Avg_Points_Last_3_Races'] - sell_avg_points
+                improved_options = potential_buys[potential_buys['Improvement_Score_Avg3'] > 0].sort_values(
+                    by='Improvement_Score_Avg3', ascending=False
+                )
+                
+                if not improved_options.empty:
+                    best_buy_for_this_sell = improved_options.iloc[0]
+                    new_team_total_value_after_swap = current_team_value - sell_price + best_buy_for_this_sell['Price']
+                    money_left_under_cap = dynamic_budget - new_team_total_value_after_swap
+
+                    possible_discretionary_swaps.append({
+                        "sell_id": sell_id,
+                        "sell_name": sell_name,
+                        "sell_price": sell_price,
+                        "sell_type": sell_type,
+                        "sell_avg_points": sell_avg_points,
+                        "buy_id": best_buy_for_this_sell['ID'],
+                        "buy_name": best_buy_for_this_sell['Name'],
+                        "buy_price": best_buy_for_this_sell['Price'],
+                        "buy_avg_points": best_buy_for_this_sell['Avg_Points_Last_3_Races'],
+                        "improvement_score": best_buy_for_this_sell['Improvement_Score_Avg3'],
+                        "new_team_value": new_team_total_value_after_swap,
+                        "money_left_under_cap": money_left_under_cap
+                    })
+
+        if possible_discretionary_swaps:
+            sorted_discretionary_swaps = sorted(possible_discretionary_swaps, key=lambda x: x['improvement_score'], reverse=True)
+            suggestions['discretionary'] = sorted_discretionary_swaps
+            # Pass dynamic_budget to display_suggestions
+            display_suggestions(suggestions['discretionary'][:num_discretionary_transfers_available], 
+                                "Discretionary Single Swaps", 
+                                dynamic_budget) # Pass dynamic_budget here
+        else:
+            print("No beneficial discretionary single swaps found based on Avg_Points_Last_3_Races and corrected budget.")
+            
+    return suggestions
+
+def display_suggestions(
+    suggestion_list, suggestion_type_name, dynamic_budget=None
+):  # Added dynamic_budget parameter
+    """
+    Displays suggestions in a readable format.
+    """
+    if not suggestion_list:
+        return
+
+    if suggestion_type_name == "Mandatory Replacements":
+        for i, suggestion_group in enumerate(suggestion_list):
+            asset_to_sell = suggestion_group["sell"]
+            options = suggestion_group["options"]
+            message = suggestion_group.get("message")
+
+            print(
+                f"\n{i+1}. For mandatory sale of: {asset_to_sell['Name']} (ID: {asset_to_sell['ID']}, Price: ${asset_to_sell['Price']:.1f}M)"
+            )
+            if message:
+                print(f"   {message}")
+            elif not options.empty:
+                print("   Potential replacements (ranked by Avg Points Last 3 Races):")
+                # Ensure all display columns exist for options
+                opt_display_cols = [
+                    "ID",
+                    "Name",
+                    "Price",
+                    "Avg_Points_Last_3_Races",
+                    "Total_Points_So_Far",
+                ]
+                for col in opt_display_cols:
+                    if col not in options.columns:
+                        options[col] = "N/A"  # Or np.nan if numeric
+                print(options[opt_display_cols].to_string(index=False))
+            else:
+                print(
+                    "   No replacement options found (this case should ideally be covered by 'message')."
+                )
+
+    elif suggestion_type_name == "Discretionary Single Swaps":
+        # Title is now more dynamic based on whether dynamic_budget is available for display
+        title_cap_info = (
+            f" (Team Budget Cap: ${dynamic_budget:.2f}M)"
+            if dynamic_budget is not None
+            else ""
+        )
+        print(
+            f"\nTop {len(suggestion_list)} Discretionary Single Swap Option(s){title_cap_info}:"
+        )
+
+        for i, swap in enumerate(suggestion_list):
+            print(
+                f"\n{i+1}. Swap Out: {swap['sell_name']} (ID: {swap['sell_id']}, Price: ${swap['sell_price']:.1f}M, AvgL3: {swap['sell_avg_points']:.2f})"
+            )
+            print(
+                f"   Swap In:  {swap['buy_name']} (ID: {swap['buy_id']}, Price: ${swap['buy_price']:.1f}M, AvgL3: {swap['buy_avg_points']:.2f})"
+            )
+            print(f"   AvgL3 Points Improvement: +{swap['improvement_score']:.2f}")
+            # Displaying the new team value and how much is left under the cap
+            print(
+                f"   Resulting Team Value: ${swap['new_team_value']:.2f}M / Money Left Under Cap: ${swap['money_left_under_cap']:.2f}M"
+            )
+
+
+def main():  # Assuming you have this structure
     all_assets_df, my_team_df, warning_msg = load_and_process_data(
         ASSET_DATA_FILE, MY_TEAM_FILE
     )
 
     dynamic_budget = 0.0
+    current_team_value = 0.0  # Initialize
+
     if all_assets_df is not None and my_team_df is not None:
-        dynamic_budget = display_team_and_budget_info(
+        # Capture both returned values
+        dynamic_budget, current_team_value = display_team_and_budget_info(
             my_team_df, INITIAL_BUDGET, warning_msg
         )
 
-        mandatory_transfers = identify_mandatory_transfers(my_team_df)
-        num_mandatory_transfers = len(mandatory_transfers)
-
-        num_discretionary_transfers = DEFAULT_FREE_TRANSFERS - num_mandatory_transfers
-        if num_discretionary_transfers < 0:
-            num_discretionary_transfers = (
-                0  # You can't have negative discretionary transfers
-            )
+        mandatory_transfers_df = identify_mandatory_transfers(my_team_df)
+        num_mandatory_transfers = len(mandatory_transfers_df)
 
         print(f"\nYou have {num_mandatory_transfers} mandatory transfer(s).")
         print(
-            f"Assuming {DEFAULT_FREE_TRANSFERS} default free transfer(s) per week, you have {num_discretionary_transfers} discretionary transfer(s) available."
+            f"The system will consider up to {DEFAULT_FREE_TRANSFERS} total transfers based on a team budget cap of ${dynamic_budget:.2f}M."
+        )  # Clarified print
+
+        # Call the suggestion function with current_team_value
+        suggested_swaps = suggest_swaps(
+            all_assets_df,
+            my_team_df,
+            mandatory_transfers_df,
+            dynamic_budget,
+            current_team_value,  # Pass current_team_value
+            DEFAULT_FREE_TRANSFERS,
+            num_mandatory_transfers,
         )
 
-        # Placeholder for next steps:
-        # 1. Implement suggestion engine for mandatory replacements
-        # 2. Implement suggestion engine for discretionary swaps
-        print("\nNext step is to implement the swap suggestion engine.")
+        if (
+            not suggested_swaps["mandatory"]
+            and not suggested_swaps["discretionary"]
+            and num_mandatory_transfers == 0
+        ):
+            print(
+                "\nNo specific swap suggestions at this time based on current criteria and corrected budget."
+            )
 
 
 if __name__ == "__main__":
