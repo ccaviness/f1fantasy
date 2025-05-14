@@ -9,6 +9,7 @@ MY_TEAM_FILE = "my_team.csv"
 # Define the expected metadata columns in asset_data.csv
 # All other columns will be treated as GP points columns
 METADATA_COLUMNS = ["ID", "Name", "Type", "Constructor", "Price", "Active"]
+DEFAULT_FREE_TRANSFERS = 1  # Standard free transfers per week, can be adjusted
 
 
 def load_and_process_data(asset_file_path, team_file_path):
@@ -147,11 +148,13 @@ def load_and_process_data(asset_file_path, team_file_path):
 def display_team_and_budget_info(team_df, initial_budget, budget_warning_message):
     """Displays current team information and budget."""
     if team_df is None:
-        return
+        return 0.0  # Return 0 for dynamic budget if team_df is None
 
     print("\n--- Your Current Team ---")
     if team_df.empty:
         print("Your team is currently empty.")
+        team_current_value = 0.0
+        team_purchase_cost = 0.0
     else:
         display_columns = [
             "ID",
@@ -167,16 +170,12 @@ def display_team_and_budget_info(team_df, initial_budget, budget_warning_message
             "PPM_on_Purchase",
             "Active",
         ]
-        # Ensure all display columns exist, add if not (e.g. for empty/new dataframes)
-        for col in display_columns:
+        for col in display_columns:  # Ensure columns exist
             if col not in team_df.columns:
                 team_df[col] = np.nan
         print(team_df[display_columns].to_string(index=False))
-
-    team_current_value = team_df["Price"].sum()
-    team_purchase_cost = team_df[
-        "Purchase_Price"
-    ].sum()  # Based on defaulted prices for now
+        team_current_value = team_df["Price"].sum()
+        team_purchase_cost = team_df["Purchase_Price"].sum()
 
     print(f"\nTotal Team Current Market Value: ${team_current_value:,.2f}M")
     print(f"Total Team Assumed Purchase Cost: ${team_purchase_cost:,.2f}M")
@@ -192,34 +191,75 @@ def display_team_and_budget_info(team_df, initial_budget, budget_warning_message
     if budget_warning_message:
         print(f"\n{budget_warning_message}")
 
-    # Team composition check
     if not team_df.empty:
         num_drivers = len(team_df[team_df["Type"] == "Driver"])
         num_constructors = len(team_df[team_df["Type"] == "Constructor"])
         print(
             f"\nTeam Composition: {num_drivers} Drivers, {num_constructors} Constructors."
         )
-        if num_drivers != 5 or num_constructors != 2:  # Standard F1 Fantasy team size
+        if num_drivers != 5 or num_constructors != 2:
             print(
                 "WARNING: Team composition might be invalid (expected 5 Drivers, 2 Constructors)."
             )
 
+    return dynamic_budget
+
+
+def identify_mandatory_transfers(team_df):
+    """Identifies inactive assets on the current team."""
+    if team_df is None or team_df.empty:
+        return pd.DataFrame()  # Return empty DataFrame if no team
+
+    mandatory_transfers_df = team_df[
+        ~team_df["Active"]
+    ].copy()  # Select rows where Active is False
+
+    if not mandatory_transfers_df.empty:
+        print("\n--- Mandatory Transfers Required ---")
+        print("The following assets on your team are INACTIVE and must be replaced:")
+        print(
+            mandatory_transfers_df[["ID", "Name", "Type", "Price"]].to_string(
+                index=False
+            )
+        )
+    else:
+        print("\n--- Mandatory Transfers Required ---")
+        print("No mandatory transfers required. All team members are active.")
+
+    return mandatory_transfers_df
+
 
 # --- Main Execution ---
 def main():
-    all_assets, my_team, warning_msg = load_and_process_data(
+    """Main function to execute the F1 Fantasy Assistant."""
+    all_assets_df, my_team_df, warning_msg = load_and_process_data(
         ASSET_DATA_FILE, MY_TEAM_FILE
     )
 
-    if all_assets is not None and my_team is not None:
-        display_team_and_budget_info(my_team, INITIAL_BUDGET, warning_msg)
+    dynamic_budget = 0.0
+    if all_assets_df is not None and my_team_df is not None:
+        dynamic_budget = display_team_and_budget_info(
+            my_team_df, INITIAL_BUDGET, warning_msg
+        )
+
+        mandatory_transfers = identify_mandatory_transfers(my_team_df)
+        num_mandatory_transfers = len(mandatory_transfers)
+
+        num_discretionary_transfers = DEFAULT_FREE_TRANSFERS - num_mandatory_transfers
+        if num_discretionary_transfers < 0:
+            num_discretionary_transfers = (
+                0  # You can't have negative discretionary transfers
+            )
+
+        print(f"\nYou have {num_mandatory_transfers} mandatory transfer(s).")
+        print(
+            f"Assuming {DEFAULT_FREE_TRANSFERS} default free transfer(s) per week, you have {num_discretionary_transfers} discretionary transfer(s) available."
+        )
 
         # Placeholder for next steps:
-        # 1. Identify mandatory transfers (inactive players on team)
-        # 2. Implement suggestion engine
-        print(
-            "\nNext steps would involve checking for mandatory transfers and suggesting swaps."
-        )
+        # 1. Implement suggestion engine for mandatory replacements
+        # 2. Implement suggestion engine for discretionary swaps
+        print("\nNext step is to implement the swap suggestion engine.")
 
 
 if __name__ == "__main__":
