@@ -524,6 +524,217 @@ def identify_mandatory_transfers(team_df):
     return mandatory_transfers_df
 
 
+def _get_available_for_purchase(all_assets_df, owned_ids_list):
+    """Filters all_assets_df for active assets not currently owned."""
+    return all_assets_df[
+        (all_assets_df["Active"]) & (~all_assets_df["ID"].isin(owned_ids_list))
+    ].copy()
+
+
+def _suggest_mandatory_replacements(
+    mandatory_assets_to_sell_df,
+    available_for_purchase_df,
+    dynamic_budget,
+    current_team_value,
+    all_assets_df_ref,
+):
+    """
+    Suggests replacements for mandatory transfers.
+    Note: This version suggests replacements for each mandatory sale independently
+          considering the initial dynamic_budget and current_team_value.
+          If multiple mandatory sales occur, the user must manage the cumulative budget impact.
+    """
+    mandatory_replacement_suggestions = []
+    budget_headroom = dynamic_budget - current_team_value
+
+    for _, asset_to_sell in mandatory_assets_to_sell_df.iterrows():
+        sell_name = asset_to_sell["Name"]
+        sell_price = asset_to_sell["Price"]
+        sell_type = asset_to_sell["Type"]
+
+        max_buy_price = sell_price + budget_headroom
+
+        potential_buys = available_for_purchase_df[
+            (available_for_purchase_df["Type"] == sell_type)
+            & (available_for_purchase_df["Price"] <= max_buy_price)
+        ].sort_values(
+            by="Combined_Score", ascending=False
+        )  # Rank by Combined_Score
+
+        suggestion_detail = {"sell": asset_to_sell, "options": pd.DataFrame()}
+        if not potential_buys.empty:
+            suggestion_detail["options"] = potential_buys.head(5)
+        else:
+            suggestion_detail["message"] = (
+                f"No suitable replacements found for {sell_name} (max price: ${max_buy_price:.2f}M)."
+            )
+        mandatory_replacement_suggestions.append(suggestion_detail)
+
+    return mandatory_replacement_suggestions
+
+
+def _suggest_sequential_single_discretionary_swaps(
+    initial_my_team_df,
+    initial_available_for_purchase_df,
+    all_assets_df_complete,
+    dynamic_budget,
+    initial_current_team_value,
+    num_swaps_to_suggest,
+):
+    """
+    Suggests a sequence of up to num_swaps_to_suggest single discretionary swaps.
+    """
+    final_discretionary_sequence = []
+
+    hypothetical_team_df = initial_my_team_df.copy()
+    hypothetical_current_team_value = initial_current_team_value
+
+    # Initial set of owned IDs for filtering available_for_purchase
+    hypothetical_owned_ids = list(hypothetical_team_df["ID"])
+
+    for transfer_num in range(num_swaps_to_suggest):
+        current_budget_headroom = dynamic_budget - hypothetical_current_team_value
+
+        if "Active" not in hypothetical_team_df.columns:
+            hypothetical_team_df = hypothetical_team_df.merge(
+                all_assets_df_complete[["ID", "Active"]], on="ID", how="left"
+            )
+        active_team_members_to_sell = hypothetical_team_df[
+            hypothetical_team_df["Active"]
+        ].copy()
+
+        best_swap_this_iteration = None
+        highest_improvement_score_this_iteration = 0  # Only positive improvements
+
+        # Dynamically update available_for_purchase based on hypothetical_owned_ids
+        current_available_for_purchase_df = all_assets_df_complete[
+            (all_assets_df_complete["Active"])
+            & (~all_assets_df_complete["ID"].isin(hypothetical_owned_ids))
+        ].copy()
+
+        for _, asset_to_sell_row in active_team_members_to_sell.iterrows():
+            sell_id = asset_to_sell_row["ID"]
+            sell_price = asset_to_sell_row["Price"]
+            sell_type = asset_to_sell_row["Type"]
+            sell_combined_score = asset_to_sell_row["Combined_Score"]
+
+            max_buy_price = sell_price + current_budget_headroom
+
+            potential_buys = current_available_for_purchase_df[
+                (current_available_for_purchase_df["Type"] == sell_type)
+                & (current_available_for_purchase_df["Price"] <= max_buy_price)
+                # ID != sell_id is implicitly handled by available_for_purchase not containing owned IDs
+            ].copy()
+
+            if not potential_buys.empty:
+                potential_buys["Improvement_Score_Combined"] = (
+                    potential_buys["Combined_Score"] - sell_combined_score
+                )
+                improved_options = potential_buys[
+                    potential_buys["Improvement_Score_Combined"] > 0
+                ].sort_values(by="Improvement_Score_Combined", ascending=False)
+
+                if not improved_options.empty:
+                    current_best_buy_for_this_sell = improved_options.iloc[0]
+                    if (
+                        current_best_buy_for_this_sell["Improvement_Score_Combined"]
+                        > highest_improvement_score_this_iteration
+                    ):
+                        highest_improvement_score_this_iteration = (
+                            current_best_buy_for_this_sell["Improvement_Score_Combined"]
+                        )
+                        best_swap_this_iteration = {
+                            "sell_id": sell_id,
+                            "sell_name": asset_to_sell_row["Name"],
+                            "sell_price": sell_price,
+                            "sell_type": sell_type,
+                            "sell_score": sell_combined_score,
+                            "sell_avg_points_raw": asset_to_sell_row[
+                                "Avg_Points_Last_3_Races"
+                            ],
+                            "sell_last_race_raw": asset_to_sell_row["Points_Last_Race"],
+                            "buy_id": current_best_buy_for_this_sell["ID"],
+                            "buy_name": current_best_buy_for_this_sell["Name"],
+                            "buy_price": current_best_buy_for_this_sell["Price"],
+                            "buy_score": current_best_buy_for_this_sell[
+                                "Combined_Score"
+                            ],
+                            "buy_avg_points_raw": current_best_buy_for_this_sell[
+                                "Avg_Points_Last_3_Races"
+                            ],
+                            "buy_last_race_raw": current_best_buy_for_this_sell[
+                                "Points_Last_Race"
+                            ],
+                            "improvement_score": highest_improvement_score_this_iteration,
+                        }
+
+        if best_swap_this_iteration:
+            swap_sell_price = best_swap_this_iteration["sell_price"]
+            swap_buy_price = best_swap_this_iteration["buy_price"]
+            new_team_val_after_this_one_swap = (
+                hypothetical_current_team_value - swap_sell_price + swap_buy_price
+            )
+            best_swap_this_iteration["new_team_value"] = (
+                new_team_val_after_this_one_swap
+            )
+            best_swap_this_iteration["money_left_under_cap"] = (
+                dynamic_budget - new_team_val_after_this_one_swap
+            )
+            final_discretionary_sequence.append(best_swap_this_iteration)
+
+            hypothetical_current_team_value = new_team_val_after_this_one_swap
+            hypothetical_team_df = hypothetical_team_df[
+                hypothetical_team_df["ID"] != best_swap_this_iteration["sell_id"]
+            ].copy()
+
+            asset_to_add_details = all_assets_df_complete[
+                all_assets_df_complete["ID"] == best_swap_this_iteration["buy_id"]
+            ].copy()
+            if (
+                "Purchase_Price" not in asset_to_add_details.columns
+            ):  # Should exist in all_assets_df_complete if processed by load_data
+                asset_to_add_details["Purchase_Price"] = asset_to_add_details[
+                    "Price"
+                ]  # Default for hypothetical
+            if "PPM_on_Purchase" not in asset_to_add_details.columns:
+                asset_to_add_details["PPM_on_Purchase"] = (
+                    0.0  # Default for hypothetical
+                )
+                if asset_to_add_details["Purchase_Price"].iloc[0] != 0:
+                    asset_to_add_details["PPM_on_Purchase"] = (
+                        asset_to_add_details["Total_Points_So_Far"]
+                        / asset_to_add_details["Purchase_Price"]
+                    )
+
+            # Align columns before concat, using the structure of the initial my_team_df
+            cols_for_hypothetical_team = list(initial_my_team_df.columns)
+            for col in cols_for_hypothetical_team:
+                if col not in asset_to_add_details.columns:
+                    # This asset from all_assets_df might be missing some calculated team-specific columns
+                    # like PPM_on_Purchase. Add with default if critical for structure.
+                    if col == "PPM_on_Purchase":
+                        asset_to_add_details[col] = 0.0
+                    # Other columns should mostly come from all_assets_df_complete
+
+            hypothetical_team_df = pd.concat(
+                [
+                    hypothetical_team_df,
+                    asset_to_add_details[cols_for_hypothetical_team],
+                ],
+                ignore_index=True,
+            )
+            # Update the list of owned IDs for the next iteration
+            hypothetical_owned_ids = list(hypothetical_team_df["ID"])
+        else:
+            if transfer_num == 0:
+                print(
+                    "No beneficial discretionary single swaps found based on Combined Score and current budget."
+                )
+            break
+
+    return final_discretionary_sequence
+
+
 def suggest_swaps(
     all_assets_df,
     my_team_df,
@@ -534,43 +745,43 @@ def suggest_swaps(
     num_mandatory_transfers,
 ):
     """
-    Suggests swaps:
-    1. Mandatory replacements (suggested independently for each mandatory slot).
-    2. A sequence of discretionary improvements if transfers are still available.
+    Orchestrates swap suggestions by calling helper functions.
     """
     suggestions = {
         "mandatory": [],
         "discretionary_sequence": [],
-    }  # Changed key for clarity
+        "double_swaps": [],
+    }  # For future
 
-    # --- 1. Handle Mandatory Transfers (logic remains largely the same: independent suggestions per slot) ---
-    # (This part is kept concise as the core logic for finding options for ONE mandatory slot is similar to before.
-    # If multiple mandatory swaps are needed, the user still needs to manage the overall budget when choosing from options.)
-    budget_headroom_initial = dynamic_budget - current_team_value
+    # If DataFrames are None or empty, don't proceed with suggestions
+    if all_assets_df is None or my_team_df is None or my_team_df.empty:
+        print("Cannot generate suggestions: missing asset data or team data.")
+        return suggestions
+
+    owned_ids = list(my_team_df["ID"])
+    initial_available_for_purchase_df = _get_available_for_purchase(
+        all_assets_df, owned_ids
+    )
+
+    # --- 1. Handle Mandatory Transfers ---
     if num_mandatory_transfers > 0:
-        print("\n--- Suggestions for Mandatory Replacements ---")
-        # (Existing logic for iterating through mandatory_transfers_df,
-        #  calculating max_buy_price = sell_price + budget_headroom_initial,
-        #  finding and storing options for each mandatory asset separately)
-        # This part will still present independent options for each mandatory slot.
-        # For brevity, I'm not repeating the full iteration here, assume it's the same as your current working version.
-        # Ensure 'display_suggestions' is called for this part.
-        # Example snippet for one mandatory asset (repeat in loop):
-        # for index, asset_to_sell in mandatory_transfers_df.iterrows():
-        #     ...
-        #     max_buy_price = asset_to_sell['Price'] + budget_headroom_initial
-        #     potential_buys = ...
-        #     # Add to suggestions['mandatory']
-        # display_suggestions(suggestions['mandatory'], "Mandatory Replacements", dynamic_budget)
-        # For now, let's assume mandatory swaps are handled and we focus on discretionary:
-
-        # If mandatory suggestions were made, display them
-        # This part of the code should be the same as your previous version that correctly handled mandatory swaps.
-        # For the purpose of this update, I'll assume that logic is in place and works.
-        # Example:
-        # if suggestions['mandatory']:
-        #    display_suggestions(suggestions['mandatory'], "Mandatory Replacements", dynamic_budget)
-        pass  # Placeholder for your existing mandatory swap suggestion logic
+        print("\n--- Suggestions for Mandatory Replacements ---")  # Title moved here
+        mandatory_replacement_suggestions = _suggest_mandatory_replacements(
+            mandatory_transfers_df,
+            initial_available_for_purchase_df,  # Use initial available pool
+            dynamic_budget,
+            current_team_value,
+            all_assets_df,  # Pass full asset list for details if needed by display
+        )
+        suggestions["mandatory"] = mandatory_replacement_suggestions
+        if suggestions["mandatory"]:
+            display_suggestions(
+                suggestions["mandatory"], "Mandatory Replacements", dynamic_budget
+            )
+        else:  # Should be covered by messages within _suggest_mandatory_replacements
+            print(
+                "No suitable mandatory replacements found or no mandatory transfers were flagged (check logic)."
+            )
 
     # --- 2. Handle Sequential Discretionary Single Swaps ---
     num_discretionary_transfers_available = (
@@ -582,201 +793,22 @@ def suggest_swaps(
             f"\n--- Sequential Suggestions for up to {num_discretionary_transfers_available} Discretionary Single Swap(s) (Using Combined Score) ---"
         )
 
-        hypothetical_team_df = my_team_df.copy()
-        hypothetical_current_team_value = current_team_value
-        final_discretionary_sequence = []
-
-        for transfer_num in range(num_discretionary_transfers_available):
-            current_budget_headroom = dynamic_budget - hypothetical_current_team_value
-
-            if "Active" not in hypothetical_team_df.columns:
-                hypothetical_team_df = hypothetical_team_df.merge(
-                    all_assets_df[["ID", "Active"]], on="ID", how="left"
-                )
-            active_team_members_to_sell = hypothetical_team_df[
-                hypothetical_team_df["Active"]
-            ].copy()
-
-            best_swap_this_iteration = None
-            # Improvement score can be negative if we are forced to sell a high scorer
-            # but for discretionary, we only want positive improvements.
-            highest_improvement_score_this_iteration = (
-                0  # Only consider positive improvements
-            )
-
-            for _, asset_to_sell_row in active_team_members_to_sell.iterrows():
-                sell_id = asset_to_sell_row["ID"]
-                sell_name = asset_to_sell_row["Name"]
-                sell_price = asset_to_sell_row["Price"]
-                sell_type = asset_to_sell_row["Type"]
-                # Use Combined_Score of the asset to sell
-                sell_combined_score = asset_to_sell_row["Combined_Score"]
-
-                max_buy_price = sell_price + current_budget_headroom
-                hypothetical_owned_ids = list(hypothetical_team_df["ID"])
-                current_available_for_purchase_df = (
-                    all_assets_df[  # all_assets_df now has Combined_Score
-                        (all_assets_df["Active"])
-                        & (~all_assets_df["ID"].isin(hypothetical_owned_ids))
-                    ].copy()
-                )
-
-                potential_buys = current_available_for_purchase_df[
-                    (current_available_for_purchase_df["Type"] == sell_type)
-                    & (current_available_for_purchase_df["Price"] <= max_buy_price)
-                ].copy()  # Removed ID != sell_id as isin(hypothetical_owned_ids) covers it
-
-                if not potential_buys.empty:
-                    # Calculate improvement based on Combined_Score
-                    potential_buys["Improvement_Score_Combined"] = (
-                        potential_buys["Combined_Score"] - sell_combined_score
-                    )
-
-                    improved_options = potential_buys[
-                        potential_buys["Improvement_Score_Combined"] > 0
-                    ].sort_values(by="Improvement_Score_Combined", ascending=False)
-
-                    if not improved_options.empty:
-                        current_best_buy_for_this_sell = improved_options.iloc[0]
-                        # if (
-                        #     current_best_buy_for_this_sell["Improvement_Score_Combined"]
-                        #     > highest_improvement_score_this_iteration
-                        # ):
-                        #     highest_improvement_score_this_iteration = (
-                        #         current_best_buy_for_this_sell[
-                        #             "Improvement_Score_Combined"
-                        #         ]
-                        #     )
-                        #     # Store relevant details for the suggestion
-                        #     best_swap_this_iteration = {
-                        #         "sell_id": sell_id,
-                        #         "sell_name": sell_name,
-                        #         "sell_price": sell_price,
-                        #         "sell_type": sell_type,
-                        #         "sell_score": sell_combined_score,  # Storing score
-                        #         "buy_id": current_best_buy_for_this_sell["ID"],
-                        #         "buy_name": current_best_buy_for_this_sell["Name"],
-                        #         "buy_price": current_best_buy_for_this_sell["Price"],
-                        #         "buy_score": current_best_buy_for_this_sell[
-                        #             "Combined_Score"
-                        #         ],  # Storing score
-                        #         "improvement_score": highest_improvement_score_this_iteration,  # This is Combined Improvement
-                        #     }
-                        if (
-                            current_best_buy_for_this_sell["Improvement_Score_Combined"]
-                            > highest_improvement_score_this_iteration
-                        ):
-                            highest_improvement_score_this_iteration = (
-                                current_best_buy_for_this_sell[
-                                    "Improvement_Score_Combined"
-                                ]
-                            )
-                            best_swap_this_iteration = {
-                                "sell_id": sell_id,
-                                "sell_name": sell_name,
-                                "sell_price": sell_price,
-                                "sell_type": sell_type,
-                                "sell_score": asset_to_sell_row[
-                                    "Combined_Score"
-                                ],  # Get score from the row being sold
-                                "sell_avg_points_raw": asset_to_sell_row[
-                                    "Avg_Points_Last_3_Races"
-                                ],  # For display
-                                "sell_last_race_raw": asset_to_sell_row[
-                                    "Points_Last_Race"
-                                ],  # ADDED FOR DISPLAY
-                                "buy_id": current_best_buy_for_this_sell["ID"],
-                                "buy_name": current_best_buy_for_this_sell["Name"],
-                                "buy_price": current_best_buy_for_this_sell["Price"],
-                                "buy_score": current_best_buy_for_this_sell[
-                                    "Combined_Score"
-                                ],
-                                "buy_avg_points_raw": current_best_buy_for_this_sell[
-                                    "Avg_Points_Last_3_Races"
-                                ],  # For display
-                                "buy_last_race_raw": current_best_buy_for_this_sell[
-                                    "Points_Last_Race"
-                                ],  # ADDED FOR DISPLAY
-                                "improvement_score": highest_improvement_score_this_iteration,
-                            }
-
-            if best_swap_this_iteration:
-                # ... (rest of the logic for updating hypothetical state and appending to final_discretionary_sequence)
-                # This part remains largely the same, just ensure the dict keys match what display_suggestions expects
-                # e.g. 'sell_avg_points' might become 'sell_score', 'buy_avg_points' to 'buy_score'
-                # For now, I will keep the existing structure and add new score fields to the dict for display.
-
-                swap_sell_price = best_swap_this_iteration["sell_price"]
-                swap_buy_price = best_swap_this_iteration["buy_price"]
-                new_team_val_after_this_one_swap = (
-                    hypothetical_current_team_value - swap_sell_price + swap_buy_price
-                )
-                best_swap_this_iteration["new_team_value"] = (
-                    new_team_val_after_this_one_swap
-                )
-                best_swap_this_iteration["money_left_under_cap"] = (
-                    dynamic_budget - new_team_val_after_this_one_swap
-                )
-
-                # Add original point metrics for display comparison if desired
-                original_sell_asset = my_team_df[
-                    my_team_df["ID"] == best_swap_this_iteration["sell_id"]
-                ].iloc[0]
-                original_buy_asset = all_assets_df[
-                    all_assets_df["ID"] == best_swap_this_iteration["buy_id"]
-                ].iloc[0]
-                best_swap_this_iteration["sell_avg_points_raw"] = original_sell_asset[
-                    "Avg_Points_Last_3_Races"
-                ]
-                best_swap_this_iteration["buy_avg_points_raw"] = original_buy_asset[
-                    "Avg_Points_Last_3_Races"
-                ]
-
-                final_discretionary_sequence.append(best_swap_this_iteration)
-
-                # ---- Update hypothetical state for the next iteration ----
-                hypothetical_current_team_value = new_team_val_after_this_one_swap
-                hypothetical_team_df = hypothetical_team_df[
-                    hypothetical_team_df["ID"] != best_swap_this_iteration["sell_id"]
-                ].copy()
-                asset_to_add_details = all_assets_df[
-                    all_assets_df["ID"] == best_swap_this_iteration["buy_id"]
-                ].copy()
-                asset_to_add_details["Purchase_Price"] = asset_to_add_details["Price"]
-                asset_to_add_details["PPM_on_Purchase"] = (
-                    (
-                        asset_to_add_details["Total_Points_So_Far"]
-                        / asset_to_add_details["Purchase_Price"]
-                    )
-                    .replace([np.inf, -np.inf], 0)
-                    .fillna(0)
-                )
-                cols_for_hypothetical_team = list(my_team_df.columns)
-                for col in cols_for_hypothetical_team:
-                    if col not in asset_to_add_details.columns:
-                        asset_to_add_details[col] = np.nan
-                hypothetical_team_df = pd.concat(
-                    [
-                        hypothetical_team_df,
-                        asset_to_add_details[cols_for_hypothetical_team],
-                    ],
-                    ignore_index=True,
-                )
-
-            else:
-                if transfer_num == 0:
-                    print(
-                        "No beneficial discretionary single swaps found based on Combined Score and current budget."
-                    )
-                break
-
-        if final_discretionary_sequence:
-            suggestions["discretionary_sequence"] = final_discretionary_sequence
+        discretionary_sequence = _suggest_sequential_single_discretionary_swaps(
+            my_team_df,  # Pass the original current team
+            initial_available_for_purchase_df,  # Pass the initial available pool
+            all_assets_df,  # Pass the complete asset data for lookups
+            dynamic_budget,
+            current_team_value,
+            num_discretionary_transfers_available,
+        )
+        suggestions["discretionary_sequence"] = discretionary_sequence
+        if suggestions["discretionary_sequence"]:
             display_suggestions(
                 suggestions["discretionary_sequence"],
                 "Discretionary Single Swaps",
                 dynamic_budget,
             )
+        # The 'no beneficial swaps found' message is now handled within _suggest_sequential_single_discretionary_swaps
 
     return suggestions
 
