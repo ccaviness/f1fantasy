@@ -34,10 +34,10 @@ WEIGHT_PROFILES = {
     },
     "aggressive_form": {  # Emphasizes recent performance and momentum
         KEY_RECENT_FORM: 0.40,
-        KEY_LAST_RACE: 0.30,
+        KEY_LAST_RACE: 0.25,
         KEY_PPM: 0.10,
         KEY_TOTAL_POINTS: 0.10,
-        KEY_TREND: 0.10,
+        KEY_TREND: 0.15,
     },
     "value_focused": {  # Emphasizes PPM and overall consistency
         KEY_RECENT_FORM: 0.15,
@@ -1031,6 +1031,148 @@ def suggest_swaps(
     return suggestions
 
 
+def suggest_target_based_double_swap(
+    fixed_sell_id, fixed_buy_id, 
+    all_assets_df, current_my_team_df, 
+    dynamic_budget, initial_current_team_value
+):
+    """
+    User wants to swap fixed_sell_id for fixed_buy_id.
+    This function finds the best accompanying second swap (if one is needed/beneficial)
+    to make the overall 2-transfer operation budget-compliant and score-optimal.
+    Assumes 2 transfers are available for this operation.
+    """
+    print(f"\n--- Target-Based Double Swap Assistant ---")
+    print(f"Attempting to swap OUT: {fixed_sell_id} for IN: {fixed_buy_id}")
+
+    # --- 1. Validate fixed part of the swap ---
+    if fixed_sell_id not in current_my_team_df['ID'].values:
+        print(f"Error: Asset to sell '{fixed_sell_id}' is not in your current team.")
+        return
+
+    asset_to_sell_1 = current_my_team_df[current_my_team_df['ID'] == fixed_sell_id].iloc[0].to_dict()
+    
+    if not all_assets_df[all_assets_df['ID'] == fixed_buy_id]['Active'].any():
+        print(f"Error: Target asset to buy '{fixed_buy_id}' is not active or does not exist.")
+        return
+        
+    asset_to_buy_1 = all_assets_df[all_assets_df['ID'] == fixed_buy_id].iloc[0].to_dict()
+
+    if asset_to_sell_1['Type'] != asset_to_buy_1['Type']:
+        print(f"Error: Asset types do not match for the fixed swap ({asset_to_sell_1['Type']} vs {asset_to_buy_1['Type']}).")
+        return
+
+    if fixed_buy_id in current_my_team_df['ID'].values:
+        print(f"Error: Target asset to buy '{fixed_buy_id}' is already on your team (cannot swap for itself).")
+        return
+
+    print(f"Fixed Part 1: Sell {asset_to_sell_1['Name']} (Price ${asset_to_sell_1['Price']:.1f}M, Score {asset_to_sell_1['Combined_Score']:.2f})")
+    print(f"           Buy  {asset_to_buy_1['Name']} (Price ${asset_to_buy_1['Price']:.1f}M, Score {asset_to_buy_1['Combined_Score']:.2f})")
+
+    cost_of_first_swap = asset_to_buy_1['Price'] - asset_to_sell_1['Price']
+    score_change_from_first_swap = asset_to_buy_1['Combined_Score'] - asset_to_sell_1['Combined_Score']
+    
+    print(f"Impact of this first swap: Cost Change = ${cost_of_first_swap:+.1f}M, Score Change = {score_change_from_first_swap:+.2f}")
+
+    # --- 2. Determine budget for the second part of the swap ---
+    initial_budget_headroom = dynamic_budget - initial_current_team_value
+    # This is how much the *second swap's net cost* can be (Price_Z - Price_Y)
+    budget_allowance_for_second_swap_net_spend = initial_budget_headroom - cost_of_first_swap
+    
+    print(f"Initial budget headroom: ${initial_budget_headroom:.2f}M")
+    print(f"Net spend allowance for second swap (Price_Z - Price_Y): ${budget_allowance_for_second_swap_net_spend:.2f}M")
+
+    # --- 3. Find optimal second swap (Sell Y, Buy Z) ---
+    best_second_swap_details = None
+    highest_net_score_improvement_for_total_operation = -float('inf') # Initialize with a very low number
+
+    # Potential assets to sell (Y) from the team, EXCLUDING the one already sold (asset_to_sell_1)
+    # and ensuring they are active.
+    potential_sell_y_df = current_my_team_df[
+        (current_my_team_df['ID'] != fixed_sell_id) & 
+        (current_my_team_df['Active'])
+    ].copy()
+
+    # Assets available to purchase (Z) - active and not asset_to_buy_1, and not any other current team member
+    # (except the one being sold as Y in this iteration)
+    owned_ids_after_first_hypothetical_swap = list(potential_sell_y_df['ID']) + [fixed_buy_id]
+    
+    available_for_purchase_z_df = all_assets_df[
+        (all_assets_df['Active']) & 
+        (~all_assets_df['ID'].isin(owned_ids_after_first_hypothetical_swap))
+    ].copy()
+
+
+    for _, asset_y_row in potential_sell_y_df.iterrows():
+        asset_y = asset_y_row.to_dict()
+        max_price_for_z = asset_y['Price'] + budget_allowance_for_second_swap_net_spend
+
+        potential_buy_z_options = available_for_purchase_z_df[
+            (available_for_purchase_z_df['Type'] == asset_y['Type']) &
+            (available_for_purchase_z_df['Price'] <= max_price_for_z) &
+            (available_for_purchase_z_df['ID'] != asset_y['ID']) # Should be covered by available_for_purchase
+        ].copy()
+
+        if not potential_buy_z_options.empty:
+            # Score for this second swap part only
+            potential_buy_z_options['Second_Swap_Score_Improvement'] = potential_buy_z_options['Combined_Score'] - asset_y['Combined_Score']
+            
+            # We want the Z that maximizes (Score_Z - Score_Y)
+            best_z_for_this_y = potential_buy_z_options.sort_values(by='Second_Swap_Score_Improvement', ascending=False).iloc[0].to_dict()
+            
+            current_total_operation_score_improvement = score_change_from_first_swap + best_z_for_this_y['Second_Swap_Score_Improvement']
+
+            if current_total_operation_score_improvement > highest_net_score_improvement_for_total_operation:
+                highest_net_score_improvement_for_total_operation = current_total_operation_score_improvement
+                
+                final_team_value = initial_current_team_value - asset_to_sell_1['Price'] + asset_to_buy_1['Price'] \
+                                                            - asset_y['Price'] + best_z_for_this_y['Price']
+                
+                best_second_swap_details = {
+                    "sell_y": asset_y,
+                    "buy_z": best_z_for_this_y,
+                    "second_swap_score_improvement": best_z_for_this_y['Second_Swap_Score_Improvement'],
+                    "total_operation_score_improvement": current_total_operation_score_improvement,
+                    "final_team_value": final_team_value,
+                    "money_left_under_cap": dynamic_budget - final_team_value
+                }
+
+    # --- 4. Present the result ---
+    if best_second_swap_details:
+        print("\n--- Optimal Accompanying Second Swap Found ---")
+        sy = best_second_swap_details['sell_y']
+        bz = best_second_swap_details['buy_z']
+        print(f"To make the primary swap (Out: {asset_to_sell_1['Name']}, In: {asset_to_buy_1['Name']}) work best:")
+        print(f"  Also Sell (Y): {sy['Name']} (ID: {sy['ID']}, Price ${sy['Price']:.1f}M, Score {sy['Combined_Score']:.2f})")
+        print(f"  And Buy   (Z): {bz['Name']} (ID: {bz['ID']}, Price ${bz['Price']:.1f}M, Score {bz['Combined_Score']:.2f})")
+        print(f"Score improvement from second swap (Z - Y): {best_second_swap_details['second_swap_score_improvement']:+.2f}")
+        print(f"Total Combined Score improvement for both transfers: {best_second_swap_details['total_operation_score_improvement']:+.2f}")
+        print(f"Final Team Value after both swaps: ${best_second_swap_details['final_team_value']:.2f}M")
+        print(f"Money Left Under Cap ({dynamic_budget:.2f}M): ${best_second_swap_details['money_left_under_cap']:.2f}M")
+        
+        # Check if the first swap alone was already over budget before this second enabling swap
+        value_after_just_first_swap = initial_current_team_value - asset_to_sell_1['Price'] + asset_to_buy_1['Price']
+        if value_after_just_first_swap > dynamic_budget:
+            print(f"Note: The first swap alone (Out: {asset_to_sell_1['Name']}, In: {asset_to_buy_1['Name']}) would have resulted in a team value of ${value_after_just_first_swap:.2f}M.")
+            print("The suggested second swap helps to make this financially viable.")
+        elif best_second_swap_details['second_swap_score_improvement'] < 0:
+             print("Note: The suggested second swap results in a score decrease for that part, likely to enable the primary transfer financially.")
+
+
+    else: # No Y/Z swap found that works or improves things
+        # Check if the first swap is viable on its own (as a single transfer)
+        value_after_first_swap = initial_current_team_value - asset_to_sell_1['Price'] + asset_to_buy_1['Price']
+        if value_after_first_swap <= dynamic_budget:
+            print("\nNo beneficial accompanying second swap found.")
+            print(f"However, the primary swap (Out: {asset_to_sell_1['Name']}, In: {asset_to_buy_1['Name']}) is possible as a single transfer:")
+            print(f"  Cost Change: ${cost_of_first_swap:+.1f}M, Score Change: {score_change_from_first_swap:+.2f}")
+            print(f"  Resulting Team Value: ${value_after_first_swap:.2f}M / Money Left Under Cap: ${dynamic_budget - value_after_first_swap:.2f}M")
+            print("You would need to use 1 of your free transfers for this.")
+        else:
+            print("\nNo accompanying second swap found that makes the primary transfer financially viable or beneficial.")
+            print(f"The primary swap (Out: {asset_to_sell_1['Name']}, In: {asset_to_buy_1['Name']}) alone would result in a team value of ${value_after_first_swap:.2f}M, exceeding the budget cap of ${dynamic_budget:.2f}M.")
+
+
 def display_suggestions(suggestion_list, suggestion_type_name, dynamic_budget=None):
     """
     Displays suggestions in a readable format.
@@ -1367,61 +1509,52 @@ def main():
         print("Exiting due to critical error in data loading.")
         return
 
-    # --- Mode Selection (Weekly Transfers or Wildcard) ---
     print("\nChoose mode:")
-    print("1. Weekly Transfer Suggestions")
-    print("2. Wildcard Team Optimizer (Build new team from scratch)")
+    print("1. Weekly Transfer Suggestions (Automated)")
+    print("2. Wildcard Team Optimizer")
+    print("3. Target-Based Double Transfer Assistant (Specify one swap, find best second)") # New Option
+    
+    mode_choice = input("Enter choice (1, 2, or 3, default: 1): ") or "1"
 
-    mode_choice = input("Enter choice (1 or 2, default: 1): ") or "1"  # Default to 1
-
-    if mode_choice == "1":
-        # ... (your existing weekly transfer logic) ...
-        if my_team_df is None or my_team_df.empty:
-            print(
-                "Cannot proceed with weekly transfers: Team data is missing or empty."
-            )
+    if mode_choice == '1':
+        # ... (existing weekly transfer logic) ...
+        if my_team_df is None or my_team_df.empty: # Check my_team_df here
+            print("Cannot proceed with weekly transfers: Team data is missing or empty.")
             return
-
-        dynamic_budget, current_team_value = display_team_and_budget_info(
-            my_team_df,
-            INITIAL_BUDGET,
-            warning_msg,  # Pass original warning_msg from loading
-        )
-
+        dynamic_budget, current_team_value = display_team_and_budget_info(my_team_df, INITIAL_BUDGET, warning_msg)
         mandatory_transfers_df = identify_mandatory_transfers(my_team_df)
         num_mandatory_transfers = len(mandatory_transfers_df)
-
         print(f"\nYou have {num_mandatory_transfers} mandatory transfer(s).")
-        print(
-            f"The system will consider up to {DEFAULT_FREE_TRANSFERS} total transfers based on a team budget cap of ${dynamic_budget:.2f}M."
-        )
+        print(f"The system will consider up to {DEFAULT_FREE_TRANSFERS} total transfers based on a team budget cap of ${dynamic_budget:.2f}M.")
+        suggest_swaps(all_assets_df, my_team_df, mandatory_transfers_df, dynamic_budget, current_team_value, DEFAULT_FREE_TRANSFERS, num_mandatory_transfers)
 
-        suggested_swaps = suggest_swaps(
-            all_assets_df,
-            my_team_df,
-            mandatory_transfers_df,
-            dynamic_budget,
-            current_team_value,
-            DEFAULT_FREE_TRANSFERS,
-            num_mandatory_transfers,
-        )
-
-        no_mandatory = not suggested_swaps.get("mandatory")
-        no_discretionary_seq = not suggested_swaps.get("discretionary_sequence")
-        no_double_swaps = not suggested_swaps.get("true_double_swaps")
-
-        if (
-            no_mandatory
-            and no_discretionary_seq
-            and no_double_swaps
-            and num_mandatory_transfers == 0
-        ):
-            print(
-                "\nNo specific swap suggestions at this time based on current criteria and budget."
-            )
-
-    elif mode_choice == "2":
+    elif mode_choice == '2':
         optimize_wildcard_team(all_assets_df, INITIAL_BUDGET)
+        
+    elif mode_choice == '3':
+        if my_team_df is None or my_team_df.empty:
+            print("Cannot proceed with target-based swap: Team data is missing or empty.")
+            return
+        
+        dynamic_budget, current_team_value = display_team_and_budget_info(my_team_df, INITIAL_BUDGET, warning_msg) # Get budget without printing team yet
+
+        print("\n--- Target-Based Double Transfer Input ---")
+        fixed_sell_id = input("Enter ID of asset to SELL (e.g., ALP): ").strip().upper()
+        fixed_buy_id = input("Enter ID of asset to BUY (e.g., WIL): ").strip().upper()
+        
+        if fixed_sell_id and fixed_buy_id:
+            # Display current team once before showing suggestions for this mode
+            print("\nRecalculating team info before targeted swap analysis...")
+            display_team_and_budget_info(my_team_df, INITIAL_BUDGET, warning_msg) # Display now
+
+            suggest_target_based_double_swap(
+                fixed_sell_id, fixed_buy_id,
+                all_assets_df, my_team_df,
+                dynamic_budget, current_team_value
+            )
+        else:
+            print("Both asset IDs (sell and buy) must be provided.")
+            
     else:
         print("Invalid mode choice. Exiting.")
 
