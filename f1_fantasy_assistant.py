@@ -1,3 +1,4 @@
+import os
 import pandas as pd
 import numpy as np
 
@@ -5,6 +6,7 @@ import numpy as np
 INITIAL_BUDGET = 100.0  # Standard initial budget in F1 Fantasy (in millions)
 ASSET_DATA_FILE = "asset_data.csv"
 MY_TEAM_FILE = "my_team.csv"
+MANUAL_ADJUSTMENTS_FILE = "manual_adjustments.csv"
 
 # Define the expected metadata columns in asset_data.csv
 # All other columns will be treated as GP points columns
@@ -16,7 +18,9 @@ WEIGHT_RECENT_FORM = 0.6  # For Avg_Points_Last_3_Races
 WEIGHT_PPM = 0.4  # For PPM_Current
 
 
-def load_and_process_data(asset_file, team_file):
+def load_and_process_data(
+    asset_file, team_file, adjustments_file
+):  # Added adjustments_file parameter
     warning_msg = ""
     asset_data_df = None
     my_team_df = None
@@ -26,83 +30,61 @@ def load_and_process_data(asset_file, team_file):
     print(
         f"Attempting to load team data from: {team_file if team_file else 'No team file specified'}"
     )
+    print(f"Attempting to load manual adjustments from: {adjustments_file}")
 
     try:
         asset_data_df = pd.read_csv(asset_file)
         asset_data_df.columns = asset_data_df.columns.str.strip()
 
-        # 1. Ensure essential METADATA columns exist
         for col in METADATA_COLUMNS:
             if col not in asset_data_df.columns:
                 raise ValueError(
                     f"Essential metadata column '{col}' not found in {asset_file}. Required: {METADATA_COLUMNS}"
                 )
 
-        # Crucial Note for User: Ensure GP columns in your CSV are in chronological order!
-        # Example: Sakhir (Bahrain), Jeddah (Saudi Arabia), Melbourne (Australia), ...
-
-        # 2. Identify Potential GP Columns and determine completed ones
         potential_gp_cols = [
             col for col in asset_data_df.columns if col not in METADATA_COLUMNS
         ]
-
         completed_gp_cols = []
-        if not potential_gp_cols:
-            warning_msg += "\nWarning: No potential GP points columns found in asset_data.csv (columns other than metadata)."
-        else:
-            print(f"Found potential GP columns: {potential_gp_cols}")
-            for col_name in potential_gp_cols:
-                # Convert to numeric, coercing errors. This does not fill NaNs yet.
-                numeric_series = pd.to_numeric(asset_data_df[col_name], errors="coerce")
-                # A GP is completed if at least one asset has a non-NaN score
-                if numeric_series.notna().any():
-                    completed_gp_cols.append(col_name)
-                    asset_data_df[col_name] = (
-                        numeric_series  # Store the numeric version (with NaNs)
-                    )
-                else:
-                    # If column has no valid numeric data, treat it as not completed / make it all NaN
-                    # This helps if it had non-numeric placeholders like '-' that weren't caught by 'coerce' alone
-                    asset_data_df[col_name] = np.nan
 
-        if not completed_gp_cols:
-            warning_msg += "\nWarning: No completed GP races identified from the data. Points-based metrics will be zero."
+        if not potential_gp_cols:
+            warning_msg += "\nWarning: No potential GP points columns found. Points-based metrics will be zero."
             asset_data_df["Total_Points_So_Far"] = 0.0
             asset_data_df["Avg_Points_Last_3_Races"] = 0.0
             asset_data_df["Points_Last_Race"] = 0.0
-            print("No completed GP columns found.")
         else:
-            print(f"Identified completed GP columns: {completed_gp_cols}")
-            # Ensure only these completed_gp_cols (which are now numeric with NaNs) are used for calculations
+            for col_name in potential_gp_cols:
+                numeric_series = pd.to_numeric(asset_data_df[col_name], errors="coerce")
+                if numeric_series.notna().any():
+                    completed_gp_cols.append(col_name)
+                    asset_data_df[col_name] = numeric_series
+                else:
+                    asset_data_df[col_name] = np.nan
 
-            # 3. Calculate Total_Points_So_Far from completed races
-            asset_data_df["Total_Points_So_Far"] = asset_data_df[completed_gp_cols].sum(
-                axis=1, skipna=True
-            )
-
-            # 4. Calculate Avg_Points_Last_3_Races from completed races
-            num_races_to_average = min(len(completed_gp_cols), 3)
-            if num_races_to_average > 0:
-                last_n_completed_gp_cols = completed_gp_cols[-num_races_to_average:]
-                print(
-                    f"Calculating Avg_Points_Last_3_Races based on: {last_n_completed_gp_cols}"
-                )
-                asset_data_df["Avg_Points_Last_3_Races"] = (
-                    asset_data_df[last_n_completed_gp_cols]
-                    .mean(axis=1, skipna=True)
-                    .fillna(0)
-                )
-            else:
+            if not completed_gp_cols:
+                warning_msg += "\nWarning: No completed GP races identified. Points metrics will be zero."
+                asset_data_df["Total_Points_So_Far"] = 0.0
                 asset_data_df["Avg_Points_Last_3_Races"] = 0.0
+                asset_data_df["Points_Last_Race"] = 0.0
+            else:
+                asset_data_df["Total_Points_So_Far"] = asset_data_df[
+                    completed_gp_cols
+                ].sum(axis=1, skipna=True)
+                num_races_to_average = min(len(completed_gp_cols), 3)
+                if num_races_to_average > 0:
+                    last_n_completed_gp_cols = completed_gp_cols[-num_races_to_average:]
+                    asset_data_df["Avg_Points_Last_3_Races"] = (
+                        asset_data_df[last_n_completed_gp_cols]
+                        .mean(axis=1, skipna=True)
+                        .fillna(0)
+                    )
+                else:
+                    asset_data_df["Avg_Points_Last_3_Races"] = 0.0
+                asset_data_df["Points_Last_Race"] = asset_data_df[
+                    completed_gp_cols[-1]
+                ].fillna(0)
 
-            # 5. Calculate Points_Last_Race from the latest completed race
-            last_completed_race_col = completed_gp_cols[-1]
-            print(f"Calculating Points_Last_Race based on: {last_completed_race_col}")
-            asset_data_df["Points_Last_Race"] = asset_data_df[
-                last_completed_race_col
-            ].fillna(0)
-
-        # Price parsing
+        # Price parsing and Active column
         if "Price" in asset_data_df.columns:
             if asset_data_df["Price"].dtype == "object":
                 asset_data_df["Price"] = (
@@ -117,10 +99,69 @@ def load_and_process_data(asset_file, team_file):
         else:
             asset_data_df["Price"] = 0.0
             warning_msg += "\nCritical Warning: 'Price' column missing from asset data."
-
         asset_data_df["Active"] = asset_data_df["Active"].astype(bool)
 
-        # Calculate PPM_Current (using the newly calculated Total_Points_So_Far)
+        # --- Load Manual Adjustments ---
+        asset_data_df["Point_Adjustment_Avg3Races"] = 0.0  # Initialize
+        if os.path.exists(adjustments_file):
+            try:
+                adjustments_df = pd.read_csv(adjustments_file)
+                adjustments_df.columns = adjustments_df.columns.str.strip()
+                if (
+                    "ID" in adjustments_df.columns
+                    and "Point_Adjustment_Avg3Races" in adjustments_df.columns
+                ):
+                    # Ensure adjustment column is numeric
+                    adjustments_df["Point_Adjustment_Avg3Races"] = pd.to_numeric(
+                        adjustments_df["Point_Adjustment_Avg3Races"], errors="coerce"
+                    ).fillna(0)
+                    asset_data_df = pd.merge(
+                        asset_data_df,
+                        adjustments_df[["ID", "Point_Adjustment_Avg3Races"]],
+                        on="ID",
+                        how="left",
+                    )
+                    asset_data_df["Point_Adjustment_Avg3Races"] = asset_data_df[
+                        "Point_Adjustment_Avg3Races_y"
+                    ].fillna(
+                        0
+                    )  # Use merged column, fill NaNs
+                    asset_data_df.drop(
+                        columns=[
+                            "Point_Adjustment_Avg3Races_y",
+                            "Point_Adjustment_Avg3Races_x",
+                        ],
+                        errors="ignore",
+                        inplace=True,
+                    )  # Clean up merge artifacts if any
+                    asset_data_df.rename(
+                        columns={
+                            "Point_Adjustment_Avg3Races_y": "Point_Adjustment_Avg3Races"
+                        },
+                        inplace=True,
+                    )  # ensure correct name if _y was used
+
+                    print("Successfully loaded and merged manual adjustments.")
+                else:
+                    warning_msg += f"\nWarning: {adjustments_file} is missing 'ID' or 'Point_Adjustment_Avg3Races' column. Adjustments not applied."
+            except Exception as e:
+                warning_msg += f"\nError loading or processing {adjustments_file}: {e}. Adjustments not applied."
+        else:
+            print(
+                f"Info: Manual adjustments file '{adjustments_file}' not found. No adjustments will be applied."
+            )
+
+        # Fallback if merge somehow failed to create the column correctly
+        if "Point_Adjustment_Avg3Races" not in asset_data_df.columns:
+            asset_data_df["Point_Adjustment_Avg3Races"] = 0.0
+
+        # --- Apply Manual Adjustments before normalization for Combined Score ---
+        asset_data_df["User_Adjusted_Avg_Points_Last_3_Races"] = (
+            asset_data_df["Avg_Points_Last_3_Races"]
+            + asset_data_df["Point_Adjustment_Avg3Races"]
+        )
+
+        # Calculate PPM_Current
         asset_data_df["PPM_Current"] = 0.0
         non_zero_price_mask = (asset_data_df["Price"].notna()) & (
             asset_data_df["Price"] != 0
@@ -133,24 +174,23 @@ def load_and_process_data(asset_file, team_file):
             asset_data_df["PPM_Current"].replace([np.inf, -np.inf], 0).fillna(0)
         )
 
-        # Calculate Combined Score
+        # Calculate Combined Score using User_Adjusted_Avg_Points_Last_3_Races
         asset_data_df["Combined_Score"] = 0.0
-        asset_data_df["Norm_Avg_Points_Last_3"] = 0.5
+        asset_data_df["Norm_Avg_Points_Last_3"] = (
+            0.5  # This will be based on adjusted points
+        )
         asset_data_df["Norm_PPM"] = 0.5
 
         for asset_type in ["Driver", "Constructor"]:
             type_mask = asset_data_df["Type"] == asset_type
             if type_mask.sum() > 0:
+                # Use 'User_Adjusted_Avg_Points_Last_3_Races' for normalization
                 avg_points_series = asset_data_df.loc[
-                    type_mask, "Avg_Points_Last_3_Races"
-                ].fillna(
-                    0
-                )  # Already filled earlier
+                    type_mask, "User_Adjusted_Avg_Points_Last_3_Races"
+                ].fillna(0)
                 norm_avg_points_for_type = normalize_series(avg_points_series)
 
-                ppm_series = asset_data_df.loc[type_mask, "PPM_Current"].fillna(
-                    0
-                )  # Already filled earlier
+                ppm_series = asset_data_df.loc[type_mask, "PPM_Current"].fillna(0)
                 norm_ppm_for_type = normalize_series(ppm_series)
 
                 asset_data_df.loc[type_mask, "Norm_Avg_Points_Last_3"] = (
@@ -171,34 +211,39 @@ def load_and_process_data(asset_file, team_file):
                 )
         asset_data_df["Combined_Score"] = asset_data_df["Combined_Score"].fillna(0)
 
-    except FileNotFoundError:
-        warning_msg = f"Error: The file {asset_file} was not found."
-        print(warning_msg)  # Print immediately
-        return None, None, warning_msg
-    except ValueError as e:
+    # ... (rest of the error handling for asset_file loading) ...
+    except FileNotFoundError:  # Catch specifically for asset_file
+        warning_msg = f"Error: The asset data file {asset_file} was not found."
+        print(warning_msg)
+        return (
+            None,
+            None,
+            warning_msg,
+        )  # Return None for DataFrames if asset_file is missing
+    # ... (the rest of your existing try-except blocks for asset_file loading) ...
+    except ValueError as e:  # Catch specific errors during asset processing
         warning_msg = f"Error processing data in {asset_file}: {e}"
-        print(warning_msg)  # Print immediately
+        print(warning_msg)
         return None, None, warning_msg
-    except Exception as e:
-        warning_msg = (
-            f"An unexpected error occurred during data loading from {asset_file}: {e}"
-        )
-        print(f"Details: {type(e).__name__} - {str(e)}")  # More detailed error
+    except Exception as e:  # Catch any other unexpected error during asset_file loading
+        warning_msg = f"An unexpected error occurred loading asset data: {e}"
+        print(f"Asset data loading error details: {type(e).__name__} - {str(e)}")
         import traceback
 
-        traceback.print_exc()  # Print full traceback for unexpected errors
+        traceback.print_exc()
         return None, None, warning_msg
 
     # --- Load and process My Team data ---
-    if team_file and asset_data_df is not None:  # Only proceed if asset_data is loaded
+    if team_file and asset_data_df is not None:
         try:
-            my_team_df_raw = pd.read_csv(team_file)
+            # ... (your existing logic for loading my_team_df_raw and handling Purchase_Price) ...
+            my_team_df_raw = pd.read_csv(team_file)  # Ensure this is inside the try
             my_team_df_raw.columns = my_team_df_raw.columns.str.strip()
-
             cols_to_select_from_raw = ["ID"]
             if "Purchase_Price" not in my_team_df_raw.columns:
                 purchase_price_was_missing_in_file = True
             else:
+                # ... (parsing Purchase_Price as before) ...
                 cols_to_select_from_raw.append("Purchase_Price")
                 if my_team_df_raw["Purchase_Price"].dtype == "object":
                     my_team_df_raw["Purchase_Price"] = (
@@ -211,6 +256,7 @@ def load_and_process_data(asset_file, team_file):
                         my_team_df_raw["Purchase_Price"], errors="coerce"
                     ).fillna(0)
 
+            # Add 'User_Adjusted_Avg_Points_Last_3_Races' and 'Point_Adjustment_Avg3Races' to merge
             cols_to_merge_from_assets = [
                 "ID",
                 "Name",
@@ -220,7 +266,9 @@ def load_and_process_data(asset_file, team_file):
                 "Active",
                 "Total_Points_So_Far",
                 "Avg_Points_Last_3_Races",
-                "Points_Last_Race",  # Added Points_Last_Race
+                "User_Adjusted_Avg_Points_Last_3_Races",
+                "Point_Adjustment_Avg3Races",  # New columns
+                "Points_Last_Race",
                 "PPM_Current",
                 "Combined_Score",
                 "Norm_Avg_Points_Last_3",
@@ -243,15 +291,11 @@ def load_and_process_data(asset_file, team_file):
                         my_team_df["Purchase_Price"] = my_team_df["Price"]
                     else:
                         my_team_df["Purchase_Price"] = 0.0
-                    warning_msg += (
-                        f"\nWarning: 'Purchase_Price' not found in {MY_TEAM_FILE}. "
-                        f"Assumed equal to Current Price. Effective budget cap: ~${INITIAL_BUDGET:.2f}M."
-                    )
+                    warning_msg += f"\nWarning: 'Purchase_Price' not found in {MY_TEAM_FILE}. Assumed equal to Current Price. Effective budget cap: ~${INITIAL_BUDGET:.2f}M."
 
                 my_team_df["Purchase_Price"] = pd.to_numeric(
                     my_team_df["Purchase_Price"], errors="coerce"
                 ).fillna(0)
-
                 my_team_df["PPM_on_Purchase"] = 0.0
                 if (
                     "Total_Points_So_Far" in my_team_df.columns
@@ -270,11 +314,13 @@ def load_and_process_data(asset_file, team_file):
                     .fillna(0)
                 )
 
-                # Fill NaNs for any other critical columns that might be missing after merge
+                # Fill NaNs for any other critical columns
                 cols_to_check_fill = [
                     "Price",
                     "Total_Points_So_Far",
                     "Avg_Points_Last_3_Races",
+                    "User_Adjusted_Avg_Points_Last_3_Races",
+                    "Point_Adjustment_Avg3Races",
                     "Points_Last_Race",
                     "PPM_Current",
                     "Combined_Score",
@@ -285,46 +331,35 @@ def load_and_process_data(asset_file, team_file):
                         if my_team_df[col].isnull().any():
                             if col == "Active":
                                 my_team_df[col] = my_team_df[col].fillna(False)
-                            else:  # Numeric columns default to 0
+                            else:
                                 my_team_df[col] = my_team_df[col].fillna(0)
-                    elif col not in [
-                        "Purchase_Price",
-                        "PPM_on_Purchase",
-                    ]:  # These are handled specially
-                        warning_msg += f"\nWarning: Column '{col}' missing in merged team data after processing."
-                        # Potentially add the column with default if essential for downstream
+                    elif col not in ["Purchase_Price", "PPM_on_Purchase"]:
                         if col == "Active":
-                            my_team_df[col] = False
+                            my_team_df[col] = False  # Ensure these columns exist
+                        elif col == "User_Adjusted_Avg_Points_Last_3_Races":
+                            my_team_df[col] = my_team_df.get(
+                                "Avg_Points_Last_3_Races", 0
+                            )
+                        elif col == "Point_Adjustment_Avg3Races":
+                            my_team_df[col] = 0.0
                         else:
                             my_team_df[col] = 0.0
+                        warning_msg += f"\nWarning: Column '{col}' missing in merged team data, defaulted."
+            # ... (rest of existing my_team_df processing) ...
 
-            elif (
-                my_team_df is not None and my_team_df.empty
-            ):  # Merge happened but no matches
-                warning_msg += f"\nWarning: Team data is empty after merge (no matching IDs found between {MY_TEAM_FILE} and {ASSET_DATA_FILE})."
-
-            if my_team_df is None:  # If merge failed or asset_data_df was None
-                warning_msg += "\nError: Could not create final team dataframe."
-
-        except FileNotFoundError:
+        except FileNotFoundError:  # Catch specifically for team_file
             warning_msg += f"\nError: Your team file {team_file} was not found."
-            my_team_df = None  # Ensure it's None
-        except Exception as e:
-            warning_msg += f"\nAn unexpected error occurred loading team data from {team_file}: {e}"
+            my_team_df = None
+        # ... (rest of your existing try-except blocks for team_file loading) ...
+        except (
+            Exception
+        ) as e:  # Catch any other unexpected error during team_file loading
+            warning_msg += f"\nAn unexpected error occurred loading team data: {e}"
             print(f"Team data loading error details: {type(e).__name__} - {str(e)}")
             import traceback
 
             traceback.print_exc()
-            my_team_df = None  # Ensure it's None
-
-    elif not team_file:
-        warning_msg += (
-            "\nInfo: No team file specified. Proceeding with asset data only."
-        )
-    elif asset_data_df is None:
-        warning_msg += (
-            "\nError: Asset data failed to load, so team data processing was skipped."
-        )
+            my_team_df = None
 
     if warning_msg.strip():
         print(
@@ -354,10 +389,13 @@ def display_team_and_budget_info(team_df, initial_budget, budget_warning_message
             "Purchase_Price",
             "Total_Points_So_Far",
             "Avg_Points_Last_3_Races",
-            "Points_Last_Race",  # Added here
+            "User_Adjusted_Avg_Points_Last_3_Races",  # New
+            "Point_Adjustment_Avg3Races",  # New
+            "Points_Last_Race",
             "PPM_Current",
             "PPM_on_Purchase",
             "Active",
+            "Combined_Score",
         ]
         # Ensure all columns in cols_to_display actually exist in team_df
         displayable_cols = [col for col in cols_to_display if col in team_df.columns]
@@ -742,9 +780,8 @@ def main():
     Main function to load data, process it, and suggest swaps.
     """
     all_assets_df, my_team_df, warning_msg = load_and_process_data(
-        ASSET_DATA_FILE, MY_TEAM_FILE
+        ASSET_DATA_FILE, MY_TEAM_FILE, MANUAL_ADJUSTMENTS_FILE
     )
-
     dynamic_budget = 0.0
     current_team_value = 0.0  # Initialize
 
