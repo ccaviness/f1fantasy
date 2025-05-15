@@ -2,6 +2,7 @@
 
 import itertools
 import os
+import pulp
 import pandas as pd
 import numpy as np
 
@@ -1083,18 +1084,155 @@ def normalize_series(series):
     return (series - min_val) / (max_val - min_val)
 
 
+def optimize_wildcard_team(
+    all_assets_df, budget, num_drivers_req=5, num_constructors_req=2
+):
+    """
+    Optimizes a new team from scratch (Wildcard) using PuLP to maximize
+    total Combined_Score within budget and composition constraints.
+    """
+    print(f"\n--- Wildcard Team Optimizer ---")
+    print(
+        f"Optimizing for a budget of ${budget:.2f}M: {num_drivers_req} Drivers, {num_constructors_req} Constructors."
+    )
+
+    # Filter for active assets only and ensure essential columns are numeric and not NaN
+    active_assets = all_assets_df[all_assets_df["Active"]].copy()
+    active_assets["Price"] = pd.to_numeric(
+        active_assets["Price"], errors="coerce"
+    ).fillna(
+        0
+    )  # Should be clean already
+    active_assets["Combined_Score"] = pd.to_numeric(
+        active_assets["Combined_Score"], errors="coerce"
+    ).fillna(
+        0
+    )  # Should be clean
+
+    # Remove assets with price > budget (cannot be part of any solution)
+    # or assets that might have non-positive prices (though unlikely)
+    active_assets = active_assets[active_assets["Price"] > 0]
+    # active_assets = active_assets[active_assets['Price'] <= budget] # Further prune (solver handles budget constraint)
+
+    if active_assets.empty:
+        print("No active assets available for optimization.")
+        return
+
+    # Create the LP problem
+    prob = pulp.LpProblem("WildcardTeamOptimization", pulp.LpMaximize)
+
+    # Decision Variables: One for each asset, representing whether it's chosen (1) or not (0)
+    # Using asset ID as key for variables for easier lookup
+    asset_ids = active_assets["ID"].tolist()
+    asset_vars = pulp.LpVariable.dicts("AssetSelected", asset_ids, cat="Binary")
+
+    # Create lookup dictionaries for price, score, type for convenience
+    prices = dict(zip(active_assets["ID"], active_assets["Price"]))
+    scores = dict(zip(active_assets["ID"], active_assets["Combined_Score"]))
+    types = dict(zip(active_assets["ID"], active_assets["Type"]))
+
+    # Objective Function: Maximize total Combined_Score
+    prob += (
+        pulp.lpSum([scores[i] * asset_vars[i] for i in asset_ids]),
+        "TotalCombinedScore",
+    )
+
+    # Constraints:
+    # 1. Budget Constraint
+    prob += (
+        pulp.lpSum([prices[i] * asset_vars[i] for i in asset_ids]) <= budget,
+        "BudgetConstraint",
+    )
+
+    # 2. Driver Count Constraint
+    driver_ids = [i for i in asset_ids if types[i] == "Driver"]
+    prob += (
+        pulp.lpSum([asset_vars[i] for i in driver_ids]) == num_drivers_req,
+        "DriverCountConstraint",
+    )
+
+    # 3. Constructor Count Constraint
+    constructor_ids = [i for i in asset_ids if types[i] == "Constructor"]
+    prob += (
+        pulp.lpSum([asset_vars[i] for i in constructor_ids]) == num_constructors_req,
+        "ConstructorCountConstraint",
+    )
+
+    # Solve the problem
+    print("Solving optimization problem...")
+    prob.solve(pulp.PULP_CBC_CMD(msg=0))  # msg=0 suppresses solver messages
+
+    # Display the results
+    print(f"\n--- Optimal Wildcard Team ---")
+    status = pulp.LpStatus[prob.status]
+    print(f"Optimization Status: {status}")
+
+    if status == "Optimal":
+        selected_asset_ids = [i for i in asset_vars if pulp.value(asset_vars[i]) == 1]
+
+        optimal_team_df = all_assets_df[
+            all_assets_df["ID"].isin(selected_asset_ids)
+        ].copy()
+
+        # Ensure correct columns for display
+        display_cols = [
+            "ID",
+            "Name",
+            "Type",
+            "Constructor",
+            "Price",
+            "Combined_Score",
+            "Avg_Points_Last_3_Races",
+            "User_Adjusted_Avg_Points_Last_3_Races",
+            "Points_Last_Race",
+            "Total_Points_So_Far",
+            "PPM_Current",
+        ]
+
+        # Filter for columns that actually exist in optimal_team_df
+        actual_display_cols = [
+            col for col in display_cols if col in optimal_team_df.columns
+        ]
+
+        print(optimal_team_df[actual_display_cols].to_string(index=False))
+
+        total_cost = optimal_team_df["Price"].sum()
+        total_score = optimal_team_df["Combined_Score"].sum()
+
+        print(f"\nTotal Optimal Team Cost: ${total_cost:.2f}M (Budget: ${budget:.2f}M)")
+        print(f"Total Optimal Team Combined Score: {total_score:.2f}")
+    elif status == "Infeasible":
+        print(
+            "The problem is infeasible. It's not possible to select a team meeting all constraints (e.g., budget too low, not enough players of a certain type)."
+        )
+    else:
+        print(
+            "Could not find an optimal solution. The problem might be unbounded or have other issues."
+        )
+
+
 def main():
-    """
-    Main function to load data, process it, and suggest swaps.
-    """
     all_assets_df, my_team_df, warning_msg = load_and_process_data(
         ASSET_DATA_FILE, MY_TEAM_FILE, MANUAL_ADJUSTMENTS_FILE
     )
-    dynamic_budget = 0.0
-    current_team_value = 0.0  # Initialize
 
-    if all_assets_df is not None and my_team_df is not None:
-        # Capture both returned values
+    if all_assets_df is None:  # Critical error during data loading
+        print("Exiting due to critical error in data loading.")
+        return
+
+    print("\nChoose mode:")
+    print("1. Weekly Transfer Suggestions")
+    print("2. Wildcard Team Optimizer (Build new team from scratch)")
+
+    mode_choice = input("Enter choice (1 or 2): ")
+
+    if mode_choice == "1":
+        if my_team_df is None or my_team_df.empty:
+            print(
+                "Cannot proceed with weekly transfers: Team data is missing or empty."
+            )
+            return
+
         dynamic_budget, current_team_value = display_team_and_budget_info(
             my_team_df, INITIAL_BUDGET, warning_msg
         )
@@ -1105,27 +1243,41 @@ def main():
         print(f"\nYou have {num_mandatory_transfers} mandatory transfer(s).")
         print(
             f"The system will consider up to {DEFAULT_FREE_TRANSFERS} total transfers based on a team budget cap of ${dynamic_budget:.2f}M."
-        )  # Clarified print
+        )
 
-        # Call the suggestion function with current_team_value
         suggested_swaps = suggest_swaps(
             all_assets_df,
             my_team_df,
             mandatory_transfers_df,
             dynamic_budget,
-            current_team_value,  # Pass current_team_value
+            current_team_value,
             DEFAULT_FREE_TRANSFERS,
             num_mandatory_transfers,
         )
 
+        # Check if any suggestions were made (using .get for safety)
+        no_mandatory = not suggested_swaps.get("mandatory")
+        no_discretionary_seq = not suggested_swaps.get("discretionary_sequence")
+        no_double_swaps = not suggested_swaps.get(
+            "true_double_swaps"
+        )  # Assuming this key exists
+
         if (
-            not suggested_swaps.get("mandatory")
-            and not suggested_swaps.get("discretionary_sequence")
+            no_mandatory
+            and no_discretionary_seq
+            and no_double_swaps
             and num_mandatory_transfers == 0
         ):
             print(
-                "\nNo specific swap suggestions at this time based on current criteria and corrected budget."
+                "\nNo specific swap suggestions at this time based on current criteria and budget."
             )
+
+    elif mode_choice == "2":
+        optimize_wildcard_team(
+            all_assets_df, INITIAL_BUDGET
+        )  # Using INITIAL_BUDGET for wildcard
+    else:
+        print("Invalid choice. Exiting.")
 
 
 if __name__ == "__main__":
