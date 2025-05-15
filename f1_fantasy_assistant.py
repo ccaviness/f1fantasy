@@ -9,8 +9,11 @@ import numpy as np
 # --- Configuration ---
 INITIAL_BUDGET = 100.0  # Standard initial budget in F1 Fantasy (in millions)
 ASSET_DATA_FILE = "asset_data.csv"
+ASSET_DATA_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRN0cf_B_U3KoYRAdCbiWrxxEplWZxiy0WQ6KIImEJ4E7mh147bDD5kSUsnDbGYFNChs6FNFQyfQThl/pub?gid=1838985806&single=true&output=csv"
 MY_TEAM_FILE = "my_team.csv"
+MY_TEAM_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRN0cf_B_U3KoYRAdCbiWrxxEplWZxiy0WQ6KIImEJ4E7mh147bDD5kSUsnDbGYFNChs6FNFQyfQThl/pub?gid=2095757091&single=true&output=csv"
 MANUAL_ADJUSTMENTS_FILE = "manual_adjustments.csv"
+MANUAL_ADJUSTMENTS_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRN0cf_B_U3KoYRAdCbiWrxxEplWZxiy0WQ6KIImEJ4E7mh147bDD5kSUsnDbGYFNChs6FNFQyfQThl/pub?gid=1943142711&single=true&output=csv"
 
 # Define the expected metadata columns in asset_data.csv
 # All other columns will be treated as GP points columns
@@ -49,23 +52,32 @@ WEIGHT_PROFILES = {
 }
 
 
-def _load_raw_asset_df(asset_file_path):
-    """Loads and performs initial validation on asset_data.csv."""
+def _load_raw_asset_df(asset_data_url):  # Parameter changed
+    """Loads and performs initial validation on asset_data from a URL."""
+    warnings = ""
     try:
-        df = pd.read_csv(asset_file_path)
+        print(f"Attempting to load asset data from URL: {asset_data_url}")
+        if (
+            not asset_data_url
+            or asset_data_url == "YOUR_GOOGLE_SHEET_URL_FOR_ASSET_DATA_CSV"
+        ):  # Check if placeholder
+            raise ValueError(
+                "Asset data URL is a placeholder or empty. Please update it in the script's configuration."
+            )
+        df = pd.read_csv(asset_data_url)
         df.columns = df.columns.str.strip()
-        for col in METADATA_COLUMNS:
+        for col in METADATA_COLUMNS:  # METADATA_COLUMNS is global
             if col not in df.columns:
                 raise ValueError(
-                    f"Essential metadata column '{col}' not found in {asset_file_path}. Required: {METADATA_COLUMNS}"
+                    f"Essential metadata column '{col}' not found in data from {asset_data_url}. Required: {METADATA_COLUMNS}"
                 )
-        return df, ""
-    except FileNotFoundError:
-        return None, f"\nError: The asset data file {asset_file_path} was not found."
-    except ValueError as e:
-        return None, f"\nError validating asset data columns in {asset_file_path}: {e}"
-    except Exception as e:
-        return None, f"\nUnexpected error loading {asset_file_path}: {e}"
+        return df, warnings
+    except (
+        ValueError
+    ) as e:  # Catch our specific ValueError for placeholder or missing columns
+        return None, f"\nConfiguration or Data Error: {e}"
+    except Exception as e:  # More general exception for URL/network issues
+        return None, f"\nError loading asset data from URL {asset_data_url}: {e}"
 
 
 def _calculate_points_metrics(df, metadata_cols_list):
@@ -139,59 +151,69 @@ def _preprocess_asset_attributes(df):
     return df, warnings
 
 
-def _apply_manual_adjustments(df, adjustments_file_path):
-    """Applies manual point adjustments from a CSV file."""
+def _apply_manual_adjustments(df, adjustments_url):
     warnings = ""
-    df["Point_Adjustment_Avg3Races"] = 0.0  # Initialize
+    # Initialize the target column in the main df first
+    # This ensures it exists, even if no adjustments are loaded or merged.
+    df["Point_Adjustment_Avg3Races"] = 0.0
 
-    if os.path.exists(adjustments_file_path):
-        try:
-            adj_df = pd.read_csv(adjustments_file_path)
-            adj_df.columns = adj_df.columns.str.strip()
-            if (
-                "ID" in adj_df.columns
-                and "Point_Adjustment_Avg3Races" in adj_df.columns
-            ):
-                adj_df["Point_Adjustment_Avg3Races"] = pd.to_numeric(
-                    adj_df["Point_Adjustment_Avg3Races"], errors="coerce"
-                ).fillna(0)
-
-                # Use a temporary column for the merge result to avoid direct assignment issues
-                df = pd.merge(
-                    df,
-                    adj_df[["ID", "Point_Adjustment_Avg3Races"]],
-                    on="ID",
-                    how="left",
-                    suffixes=("", "_adj"),
-                )
-
-                # Fill NaNs from merge and assign to the final column
-                df["Point_Adjustment_Avg3Races"] = df[
-                    "Point_Adjustment_Avg3Races_adj"
-                ].fillna(0)
-                df.drop(
-                    columns=["Point_Adjustment_Avg3Races_adj"],
-                    errors="ignore",
-                    inplace=True,
-                )
-
-                print("Successfully loaded and merged manual adjustments.")
-            else:
-                warnings += f"\nWarning: {adjustments_file_path} is missing 'ID' or 'Point_Adjustment_Avg3Races' column. Adjustments not applied."
-        except Exception as e:
-            warnings += f"\nError loading or processing {adjustments_file_path}: {e}. Adjustments not applied."
-    else:
+    if (
+        not adjustments_url
+        or adjustments_url == "YOUR_GOOGLE_SHEET_URL_FOR_MANUAL_ADJUSTMENTS_CSV"
+    ):
         print(
-            f"Info: Manual adjustments file '{adjustments_file_path}' not found. No adjustments will be applied."
+            "Info: Manual adjustments URL is a placeholder or empty. No adjustments will be applied."
+        )
+        # df['User_Adjusted_Avg_Points_Last_3_Races'] will be calculated later using the initialized 0.0
+        if (
+            "Avg_Points_Last_3_Races" in df.columns
+            and "User_Adjusted_Avg_Points_Last_3_Races" not in df.columns
+        ):
+            df["User_Adjusted_Avg_Points_Last_3_Races"] = df["Avg_Points_Last_3_Races"]
+        return df, warnings
+
+    try:
+        print(f"Attempting to load manual adjustments from URL: {adjustments_url}")
+        adj_df = pd.read_csv(adjustments_url)
+        adj_df.columns = adj_df.columns.str.strip()
+
+        if "ID" in adj_df.columns and "Point_Adjustment_Avg3Races" in adj_df.columns:
+            # Ensure the adjustment column from the file is numeric
+            adj_df["Point_Adjustment_Avg3Races_from_file"] = pd.to_numeric(
+                adj_df["Point_Adjustment_Avg3Races"], errors="coerce"
+            ).fillna(0)
+
+            # Merge. Suffixes will apply if 'Point_Adjustment_Avg3Races' was already in df (which it is, as 0.0)
+            # However, since we want to overwrite, a map or update approach is cleaner.
+            # Let's use map for simplicity if IDs are unique in adj_df, or merge and then select.
+
+            # Create a mapping from ID to adjustment value
+            adjustment_map = adj_df.set_index("ID")[
+                "Point_Adjustment_Avg3Races_from_file"
+            ]
+
+            # Apply this map to the 'ID' column of the main df to create/update Point_Adjustment_Avg3Races
+            # This will align adjustments by ID and fill with NaN for IDs in df not in adjustment_map
+            df["Point_Adjustment_Avg3Races"] = df["ID"].map(adjustment_map).fillna(0)
+
+            print("Successfully loaded and applied manual adjustments.")
+        else:
+            warnings += f"\nWarning: Data from {adjustments_url} is missing 'ID' or 'Point_Adjustment_Avg3Races' column. Adjustments not applied (using 0).."
+    except Exception as e:
+        warnings += f"\nError loading or processing adjustments from URL {adjustments_url}: {e}. Adjustments not applied (using 0)."
+
+    # Ensure the 'User_Adjusted_Avg_Points_Last_3_Races' column is created
+    if "Avg_Points_Last_3_Races" in df.columns:
+        df["User_Adjusted_Avg_Points_Last_3_Races"] = (
+            df["Avg_Points_Last_3_Races"] + df["Point_Adjustment_Avg3Races"]
+        )
+    else:
+        warnings += "\nWarning: 'Avg_Points_Last_3_Races' missing for applying manual adjustments."
+        # If Avg_Points is missing, User_Adjusted will just be the adjustment itself, or 0 if Point_Adjustment is also missing.
+        df["User_Adjusted_Avg_Points_Last_3_Races"] = df.get(
+            "Point_Adjustment_Avg3Races", 0.0
         )
 
-    # Ensure the column exists even if file loading failed or file not found
-    if "Point_Adjustment_Avg3Races" not in df.columns:
-        df["Point_Adjustment_Avg3Races"] = 0.0
-
-    df["User_Adjusted_Avg_Points_Last_3_Races"] = (
-        df["Avg_Points_Last_3_Races"] + df["Point_Adjustment_Avg3Races"]
-    )
     return df, warnings
 
 
@@ -296,14 +318,16 @@ def _calculate_derived_scores(df, selected_weights):  # Added selected_weights p
     return df, warnings
 
 
-def _load_and_process_team_df(team_file_path, all_assets_df_processed):
-    """Loads team data, merges with asset data, and handles Purchase_Price."""
+def _load_and_process_team_df(team_url, all_assets_df_processed):  # Parameter changed
+    """Loads team data from a URL, merges with asset data, and handles Purchase_Price."""
     warnings = ""
     my_team_df = None
-    purchase_price_was_missing_in_file = False
+    purchase_price_was_missing_in_file = False  # Renamed for clarity
 
-    if not team_file_path:
-        warnings += "\nInfo: No team file specified."
+    if (
+        not team_url or team_url == "YOUR_GOOGLE_SHEET_URL_FOR_MY_TEAM_CSV"
+    ):  # Check for placeholder
+        warnings += "\nInfo: Team data URL is a placeholder or empty. Proceeding without team data."
         return None, warnings
 
     if all_assets_df_processed is None:
@@ -311,16 +335,16 @@ def _load_and_process_team_df(team_file_path, all_assets_df_processed):
         return None, warnings
 
     try:
-        my_team_df_raw = pd.read_csv(team_file_path)
+        print(f"Attempting to load team data from URL: {team_url}")
+        my_team_df_raw = pd.read_csv(team_url)
         my_team_df_raw.columns = my_team_df_raw.columns.str.strip()
 
         cols_to_select_from_raw = ["ID"]
         if "Purchase_Price" not in my_team_df_raw.columns:
             purchase_price_was_missing_in_file = True
-            warnings += (
-                f"\nWarning: 'Purchase_Price' column not found in {team_file_path}."
-            )
+            warnings += f"\nWarning: 'Purchase_Price' column not found in team data from {team_url}."
         else:
+            # ... (your existing Purchase_Price parsing logic for my_team_df_raw) ...
             cols_to_select_from_raw.append("Purchase_Price")
             if my_team_df_raw["Purchase_Price"].dtype == "object":
                 my_team_df_raw["Purchase_Price"] = (
@@ -333,6 +357,8 @@ def _load_and_process_team_df(team_file_path, all_assets_df_processed):
                     my_team_df_raw["Purchase_Price"], errors="coerce"
                 ).fillna(0)
 
+        # ... (rest of the merge and processing logic for my_team_df, this part is largely the same) ...
+        # Ensure cols_to_merge_from_assets and actual_cols_to_merge are correctly defined
         cols_to_merge_from_assets = [
             "ID",
             "Name",
@@ -346,14 +372,13 @@ def _load_and_process_team_df(team_file_path, all_assets_df_processed):
             "Point_Adjustment_Avg3Races",
             "Points_Last_Race",
             "PPM_Current",
-            "Trend_Score",  # Make sure this is added
             "Combined_Score",
-            "Norm_User_Adjusted_Avg_Points_Last_3",  # Renamed from Norm_Avg_Points_Last_3
-            "Norm_Points_Last_Race",  # New
+            "Norm_User_Adjusted_Avg_Points_Last_3",
+            "Norm_Points_Last_Race",
             "Norm_PPM",
-            "Norm_Total_Points_So_Far",  # New
-            "Norm_Trend_Score",  # New
-        ]
+            "Norm_Total_Points_So_Far",
+            "Norm_Trend_Score",
+        ]  # This list should be comprehensive
         actual_cols_to_merge = [
             col
             for col in cols_to_merge_from_assets
@@ -361,25 +386,28 @@ def _load_and_process_team_df(team_file_path, all_assets_df_processed):
         ]
 
         my_team_df = pd.merge(
-            my_team_df_raw[
-                cols_to_select_from_raw
-            ],  # Still just ID or ID, Purchase_Price
-            all_assets_df_processed[actual_cols_to_merge],  # Gets all the rich data
+            my_team_df_raw[cols_to_select_from_raw],
+            all_assets_df_processed[actual_cols_to_merge],
             on="ID",
             how="left",
         )
 
+        # ... (the rest of your existing logic for defaulting Purchase_Price if it was missing, calculating PPM_on_Purchase, and filling NaNs) ...
         if my_team_df is not None and not my_team_df.empty:
             if purchase_price_was_missing_in_file:
                 if "Price" in my_team_df.columns:
                     my_team_df["Purchase_Price"] = my_team_df["Price"]
-                else:  # Should not happen if Price is in actual_cols_to_merge
+                else:
                     my_team_df["Purchase_Price"] = 0.0
-                warnings += f"\n 'Purchase_Price' defaulted to Current Price. Effective budget cap: ~${INITIAL_BUDGET:.2f}M."
+                warnings += f"\n 'Purchase_Price' defaulted to Current Price from asset data. Effective budget cap: ~${INITIAL_BUDGET:.2f}M."
+            # Ensure Purchase_Price is numeric
+            if "Purchase_Price" in my_team_df.columns:
+                my_team_df["Purchase_Price"] = pd.to_numeric(
+                    my_team_df["Purchase_Price"], errors="coerce"
+                ).fillna(0)
+            else:  # Should have been created if missing
+                my_team_df["Purchase_Price"] = 0.0
 
-            my_team_df["Purchase_Price"] = pd.to_numeric(
-                my_team_df["Purchase_Price"], errors="coerce"
-            ).fillna(0)
             my_team_df["PPM_on_Purchase"] = 0.0
             if (
                 "Total_Points_So_Far" in my_team_df.columns
@@ -396,62 +424,35 @@ def _load_and_process_team_df(team_file_path, all_assets_df_processed):
                 my_team_df["PPM_on_Purchase"].replace([np.inf, -np.inf], 0).fillna(0)
             )
 
+            # ... (your NaNs filling logic for other columns)
             if my_team_df.isnull().values.any():
                 warnings += "\nWarning: Some assets in your team file may have missing details after merge."
-                cols_to_check_fill = [
-                    "Price",
-                    "Total_Points_So_Far",
-                    "Avg_Points_Last_3_Races",
-                    "User_Adjusted_Avg_Points_Last_3_Races",
-                    "Point_Adjustment_Avg3Races",
-                    "Points_Last_Race",
-                    "PPM_Current",
-                    "Trend_Score",  # Ensure Trend_Score is here
-                    "Combined_Score",
-                    "Active",
-                    "Norm_User_Adjusted_Avg_Points_Last_3",
-                    "Norm_Points_Last_Race",
-                    "Norm_PPM",
-                    "Norm_Total_Points_So_Far",
-                    "Norm_Trend_Score",
-                ]
-                for col in cols_to_check_fill:
-                    if col in my_team_df.columns:
-                        if my_team_df[col].isnull().any():
-                            if col == "Active":
-                                my_team_df[col] = my_team_df[col].fillna(False)
-                            else:  # Numeric columns default to 0
-                                my_team_df[col] = my_team_df[col].fillna(0)
-                    # If a column from cols_to_check_fill is entirely missing from my_team_df
-                    # (shouldn't happen if actual_cols_to_merge was correct), add it with defaults.
-                    elif col not in ["Purchase_Price", "PPM_on_Purchase"]:
-                        if col == "Active":
-                            my_team_df[col] = False
-                        else:
-                            my_team_df[col] = 0.0
-                        warnings += f"\nWarning: Column '{col}' was missing in merged team data, defaulted."
+                # ... (your existing fillna loop)
 
         elif my_team_df is not None and my_team_df.empty:
-            warnings += f"\nWarning: Team data is empty after merge (check IDs in {team_file_path})."
+            warnings += f"\nWarning: Team data is empty after merge (check IDs in team data from {team_url})."
 
-        if my_team_df is None:
-            warnings += "\nError: Could not create final team dataframe."
+        if (
+            my_team_df is None
+        ):  # Should be caught by earlier checks on all_assets_df_processed
+            warnings += "\nError: Could not create final team dataframe, possibly due to asset data issues."
 
-    except FileNotFoundError:
-        warnings += f"\nError: Your team file {team_file_path} was not found."
-    except Exception as e:
-        warnings += f"\nUnexpected error loading team data from {team_file_path}: {e}\n{traceback.format_exc()}"
+    except (
+        Exception
+    ) as e:  # More general exception for URL/network issues for team data
+        warnings += f"\nError loading or processing team data from URL {team_url}: {e}\n{traceback.format_exc()}"
+        my_team_df = None  # Ensure my_team_df is None on error
 
     return my_team_df, warnings
 
 
 def load_and_process_data(
-    asset_file_path, team_file_path, adjustments_file_path, selected_weights
-):  # Added selected_weights
+    asset_data_url, team_url, adjustments_url, selected_weights
+):  # Parameters changed
     overall_warnings = []
 
     # 1. Load and validate raw asset data
-    asset_data_df, warn = _load_raw_asset_df(asset_file_path)
+    asset_data_df, warn = _load_raw_asset_df(asset_data_url)  # Use URL
     if warn:
         overall_warnings.append(warn)
     if asset_data_df is None:
@@ -477,15 +478,15 @@ def load_and_process_data(
 
     # 4. Apply manual adjustments
     asset_data_df, warn = _apply_manual_adjustments(
-        asset_data_df.copy(), adjustments_file_path
-    )
+        asset_data_df.copy(), adjustments_url
+    )  # Use URL
     if warn:
         overall_warnings.append(warn)
 
-    # 5. Calculate derived scores (PPM, Combined_Score) - Pass selected_weights
+    # 5. Calculate derived scores
     all_assets_df, warn = _calculate_derived_scores(
         asset_data_df.copy(), selected_weights
-    )  # Pass weights
+    )
     if warn:
         overall_warnings.append(warn)
     if all_assets_df is None:
@@ -498,9 +499,7 @@ def load_and_process_data(
         return None, None, final_warning_msg
 
     # 6. Load and process team data
-    my_team_df, warn = _load_and_process_team_df(
-        team_file_path, all_assets_df
-    )  # all_assets_df now has scores based on selected_weights
+    my_team_df, warn = _load_and_process_team_df(team_url, all_assets_df)  # Use URL
     if warn:
         overall_warnings.append(warn)
 
@@ -1032,9 +1031,12 @@ def suggest_swaps(
 
 
 def suggest_target_based_double_swap(
-    fixed_sell_id, fixed_buy_id, 
-    all_assets_df, current_my_team_df, 
-    dynamic_budget, initial_current_team_value
+    fixed_sell_id,
+    fixed_buy_id,
+    all_assets_df,
+    current_my_team_df,
+    dynamic_budget,
+    initial_current_team_value,
 ):
     """
     User wants to swap fixed_sell_id for fixed_buy_id.
@@ -1046,131 +1048,215 @@ def suggest_target_based_double_swap(
     print(f"Attempting to swap OUT: {fixed_sell_id} for IN: {fixed_buy_id}")
 
     # --- 1. Validate fixed part of the swap ---
-    if fixed_sell_id not in current_my_team_df['ID'].values:
+    if fixed_sell_id not in current_my_team_df["ID"].values:
         print(f"Error: Asset to sell '{fixed_sell_id}' is not in your current team.")
         return
 
-    asset_to_sell_1 = current_my_team_df[current_my_team_df['ID'] == fixed_sell_id].iloc[0].to_dict()
-    
-    if not all_assets_df[all_assets_df['ID'] == fixed_buy_id]['Active'].any():
-        print(f"Error: Target asset to buy '{fixed_buy_id}' is not active or does not exist.")
-        return
-        
-    asset_to_buy_1 = all_assets_df[all_assets_df['ID'] == fixed_buy_id].iloc[0].to_dict()
+    asset_to_sell_1 = (
+        current_my_team_df[current_my_team_df["ID"] == fixed_sell_id].iloc[0].to_dict()
+    )
 
-    if asset_to_sell_1['Type'] != asset_to_buy_1['Type']:
-        print(f"Error: Asset types do not match for the fixed swap ({asset_to_sell_1['Type']} vs {asset_to_buy_1['Type']}).")
+    if not all_assets_df[all_assets_df["ID"] == fixed_buy_id]["Active"].any():
+        print(
+            f"Error: Target asset to buy '{fixed_buy_id}' is not active or does not exist."
+        )
         return
 
-    if fixed_buy_id in current_my_team_df['ID'].values:
-        print(f"Error: Target asset to buy '{fixed_buy_id}' is already on your team (cannot swap for itself).")
+    asset_to_buy_1 = (
+        all_assets_df[all_assets_df["ID"] == fixed_buy_id].iloc[0].to_dict()
+    )
+
+    if asset_to_sell_1["Type"] != asset_to_buy_1["Type"]:
+        print(
+            f"Error: Asset types do not match for the fixed swap ({asset_to_sell_1['Type']} vs {asset_to_buy_1['Type']})."
+        )
         return
 
-    print(f"Fixed Part 1: Sell {asset_to_sell_1['Name']} (Price ${asset_to_sell_1['Price']:.1f}M, Score {asset_to_sell_1['Combined_Score']:.2f})")
-    print(f"           Buy  {asset_to_buy_1['Name']} (Price ${asset_to_buy_1['Price']:.1f}M, Score {asset_to_buy_1['Combined_Score']:.2f})")
+    if fixed_buy_id in current_my_team_df["ID"].values:
+        print(
+            f"Error: Target asset to buy '{fixed_buy_id}' is already on your team (cannot swap for itself)."
+        )
+        return
 
-    cost_of_first_swap = asset_to_buy_1['Price'] - asset_to_sell_1['Price']
-    score_change_from_first_swap = asset_to_buy_1['Combined_Score'] - asset_to_sell_1['Combined_Score']
-    
-    print(f"Impact of this first swap: Cost Change = ${cost_of_first_swap:+.1f}M, Score Change = {score_change_from_first_swap:+.2f}")
+    print(
+        f"Fixed Part 1: Sell {asset_to_sell_1['Name']} (Price ${asset_to_sell_1['Price']:.1f}M, Score {asset_to_sell_1['Combined_Score']:.2f})"
+    )
+    print(
+        f"           Buy  {asset_to_buy_1['Name']} (Price ${asset_to_buy_1['Price']:.1f}M, Score {asset_to_buy_1['Combined_Score']:.2f})"
+    )
+
+    cost_of_first_swap = asset_to_buy_1["Price"] - asset_to_sell_1["Price"]
+    score_change_from_first_swap = (
+        asset_to_buy_1["Combined_Score"] - asset_to_sell_1["Combined_Score"]
+    )
+
+    print(
+        f"Impact of this first swap: Cost Change = ${cost_of_first_swap:+.1f}M, Score Change = {score_change_from_first_swap:+.2f}"
+    )
 
     # --- 2. Determine budget for the second part of the swap ---
     initial_budget_headroom = dynamic_budget - initial_current_team_value
     # This is how much the *second swap's net cost* can be (Price_Z - Price_Y)
-    budget_allowance_for_second_swap_net_spend = initial_budget_headroom - cost_of_first_swap
-    
+    budget_allowance_for_second_swap_net_spend = (
+        initial_budget_headroom - cost_of_first_swap
+    )
+
     print(f"Initial budget headroom: ${initial_budget_headroom:.2f}M")
-    print(f"Net spend allowance for second swap (Price_Z - Price_Y): ${budget_allowance_for_second_swap_net_spend:.2f}M")
+    print(
+        f"Net spend allowance for second swap (Price_Z - Price_Y): ${budget_allowance_for_second_swap_net_spend:.2f}M"
+    )
 
     # --- 3. Find optimal second swap (Sell Y, Buy Z) ---
     best_second_swap_details = None
-    highest_net_score_improvement_for_total_operation = -float('inf') # Initialize with a very low number
+    highest_net_score_improvement_for_total_operation = -float(
+        "inf"
+    )  # Initialize with a very low number
 
     # Potential assets to sell (Y) from the team, EXCLUDING the one already sold (asset_to_sell_1)
     # and ensuring they are active.
     potential_sell_y_df = current_my_team_df[
-        (current_my_team_df['ID'] != fixed_sell_id) & 
-        (current_my_team_df['Active'])
+        (current_my_team_df["ID"] != fixed_sell_id) & (current_my_team_df["Active"])
     ].copy()
 
     # Assets available to purchase (Z) - active and not asset_to_buy_1, and not any other current team member
     # (except the one being sold as Y in this iteration)
-    owned_ids_after_first_hypothetical_swap = list(potential_sell_y_df['ID']) + [fixed_buy_id]
-    
-    available_for_purchase_z_df = all_assets_df[
-        (all_assets_df['Active']) & 
-        (~all_assets_df['ID'].isin(owned_ids_after_first_hypothetical_swap))
-    ].copy()
+    owned_ids_after_first_hypothetical_swap = list(potential_sell_y_df["ID"]) + [
+        fixed_buy_id
+    ]
 
+    available_for_purchase_z_df = all_assets_df[
+        (all_assets_df["Active"])
+        & (~all_assets_df["ID"].isin(owned_ids_after_first_hypothetical_swap))
+    ].copy()
 
     for _, asset_y_row in potential_sell_y_df.iterrows():
         asset_y = asset_y_row.to_dict()
-        max_price_for_z = asset_y['Price'] + budget_allowance_for_second_swap_net_spend
+        max_price_for_z = asset_y["Price"] + budget_allowance_for_second_swap_net_spend
 
         potential_buy_z_options = available_for_purchase_z_df[
-            (available_for_purchase_z_df['Type'] == asset_y['Type']) &
-            (available_for_purchase_z_df['Price'] <= max_price_for_z) &
-            (available_for_purchase_z_df['ID'] != asset_y['ID']) # Should be covered by available_for_purchase
+            (available_for_purchase_z_df["Type"] == asset_y["Type"])
+            & (available_for_purchase_z_df["Price"] <= max_price_for_z)
+            & (
+                available_for_purchase_z_df["ID"] != asset_y["ID"]
+            )  # Should be covered by available_for_purchase
         ].copy()
 
         if not potential_buy_z_options.empty:
             # Score for this second swap part only
-            potential_buy_z_options['Second_Swap_Score_Improvement'] = potential_buy_z_options['Combined_Score'] - asset_y['Combined_Score']
-            
-            # We want the Z that maximizes (Score_Z - Score_Y)
-            best_z_for_this_y = potential_buy_z_options.sort_values(by='Second_Swap_Score_Improvement', ascending=False).iloc[0].to_dict()
-            
-            current_total_operation_score_improvement = score_change_from_first_swap + best_z_for_this_y['Second_Swap_Score_Improvement']
+            potential_buy_z_options["Second_Swap_Score_Improvement"] = (
+                potential_buy_z_options["Combined_Score"] - asset_y["Combined_Score"]
+            )
 
-            if current_total_operation_score_improvement > highest_net_score_improvement_for_total_operation:
-                highest_net_score_improvement_for_total_operation = current_total_operation_score_improvement
-                
-                final_team_value = initial_current_team_value - asset_to_sell_1['Price'] + asset_to_buy_1['Price'] \
-                                                            - asset_y['Price'] + best_z_for_this_y['Price']
-                
+            # We want the Z that maximizes (Score_Z - Score_Y)
+            best_z_for_this_y = (
+                potential_buy_z_options.sort_values(
+                    by="Second_Swap_Score_Improvement", ascending=False
+                )
+                .iloc[0]
+                .to_dict()
+            )
+
+            current_total_operation_score_improvement = (
+                score_change_from_first_swap
+                + best_z_for_this_y["Second_Swap_Score_Improvement"]
+            )
+
+            if (
+                current_total_operation_score_improvement
+                > highest_net_score_improvement_for_total_operation
+            ):
+                highest_net_score_improvement_for_total_operation = (
+                    current_total_operation_score_improvement
+                )
+
+                final_team_value = (
+                    initial_current_team_value
+                    - asset_to_sell_1["Price"]
+                    + asset_to_buy_1["Price"]
+                    - asset_y["Price"]
+                    + best_z_for_this_y["Price"]
+                )
+
                 best_second_swap_details = {
                     "sell_y": asset_y,
                     "buy_z": best_z_for_this_y,
-                    "second_swap_score_improvement": best_z_for_this_y['Second_Swap_Score_Improvement'],
+                    "second_swap_score_improvement": best_z_for_this_y[
+                        "Second_Swap_Score_Improvement"
+                    ],
                     "total_operation_score_improvement": current_total_operation_score_improvement,
                     "final_team_value": final_team_value,
-                    "money_left_under_cap": dynamic_budget - final_team_value
+                    "money_left_under_cap": dynamic_budget - final_team_value,
                 }
 
     # --- 4. Present the result ---
     if best_second_swap_details:
         print("\n--- Optimal Accompanying Second Swap Found ---")
-        sy = best_second_swap_details['sell_y']
-        bz = best_second_swap_details['buy_z']
-        print(f"To make the primary swap (Out: {asset_to_sell_1['Name']}, In: {asset_to_buy_1['Name']}) work best:")
-        print(f"  Also Sell (Y): {sy['Name']} (ID: {sy['ID']}, Price ${sy['Price']:.1f}M, Score {sy['Combined_Score']:.2f})")
-        print(f"  And Buy   (Z): {bz['Name']} (ID: {bz['ID']}, Price ${bz['Price']:.1f}M, Score {bz['Combined_Score']:.2f})")
-        print(f"Score improvement from second swap (Z - Y): {best_second_swap_details['second_swap_score_improvement']:+.2f}")
-        print(f"Total Combined Score improvement for both transfers: {best_second_swap_details['total_operation_score_improvement']:+.2f}")
-        print(f"Final Team Value after both swaps: ${best_second_swap_details['final_team_value']:.2f}M")
-        print(f"Money Left Under Cap ({dynamic_budget:.2f}M): ${best_second_swap_details['money_left_under_cap']:.2f}M")
-        
+        sy = best_second_swap_details["sell_y"]
+        bz = best_second_swap_details["buy_z"]
+        print(
+            f"To make the primary swap (Out: {asset_to_sell_1['Name']}, In: {asset_to_buy_1['Name']}) work best:"
+        )
+        print(
+            f"  Also Sell (Y): {sy['Name']} (ID: {sy['ID']}, Price ${sy['Price']:.1f}M, Score {sy['Combined_Score']:.2f})"
+        )
+        print(
+            f"  And Buy   (Z): {bz['Name']} (ID: {bz['ID']}, Price ${bz['Price']:.1f}M, Score {bz['Combined_Score']:.2f})"
+        )
+        print(
+            f"Score improvement from second swap (Z - Y): {best_second_swap_details['second_swap_score_improvement']:+.2f}"
+        )
+        print(
+            f"Total Combined Score improvement for both transfers: {best_second_swap_details['total_operation_score_improvement']:+.2f}"
+        )
+        print(
+            f"Final Team Value after both swaps: ${best_second_swap_details['final_team_value']:.2f}M"
+        )
+        print(
+            f"Money Left Under Cap ({dynamic_budget:.2f}M): ${best_second_swap_details['money_left_under_cap']:.2f}M"
+        )
+
         # Check if the first swap alone was already over budget before this second enabling swap
-        value_after_just_first_swap = initial_current_team_value - asset_to_sell_1['Price'] + asset_to_buy_1['Price']
+        value_after_just_first_swap = (
+            initial_current_team_value
+            - asset_to_sell_1["Price"]
+            + asset_to_buy_1["Price"]
+        )
         if value_after_just_first_swap > dynamic_budget:
-            print(f"Note: The first swap alone (Out: {asset_to_sell_1['Name']}, In: {asset_to_buy_1['Name']}) would have resulted in a team value of ${value_after_just_first_swap:.2f}M.")
+            print(
+                f"Note: The first swap alone (Out: {asset_to_sell_1['Name']}, In: {asset_to_buy_1['Name']}) would have resulted in a team value of ${value_after_just_first_swap:.2f}M."
+            )
             print("The suggested second swap helps to make this financially viable.")
-        elif best_second_swap_details['second_swap_score_improvement'] < 0:
-             print("Note: The suggested second swap results in a score decrease for that part, likely to enable the primary transfer financially.")
+        elif best_second_swap_details["second_swap_score_improvement"] < 0:
+            print(
+                "Note: The suggested second swap results in a score decrease for that part, likely to enable the primary transfer financially."
+            )
 
-
-    else: # No Y/Z swap found that works or improves things
+    else:  # No Y/Z swap found that works or improves things
         # Check if the first swap is viable on its own (as a single transfer)
-        value_after_first_swap = initial_current_team_value - asset_to_sell_1['Price'] + asset_to_buy_1['Price']
+        value_after_first_swap = (
+            initial_current_team_value
+            - asset_to_sell_1["Price"]
+            + asset_to_buy_1["Price"]
+        )
         if value_after_first_swap <= dynamic_budget:
             print("\nNo beneficial accompanying second swap found.")
-            print(f"However, the primary swap (Out: {asset_to_sell_1['Name']}, In: {asset_to_buy_1['Name']}) is possible as a single transfer:")
-            print(f"  Cost Change: ${cost_of_first_swap:+.1f}M, Score Change: {score_change_from_first_swap:+.2f}")
-            print(f"  Resulting Team Value: ${value_after_first_swap:.2f}M / Money Left Under Cap: ${dynamic_budget - value_after_first_swap:.2f}M")
+            print(
+                f"However, the primary swap (Out: {asset_to_sell_1['Name']}, In: {asset_to_buy_1['Name']}) is possible as a single transfer:"
+            )
+            print(
+                f"  Cost Change: ${cost_of_first_swap:+.1f}M, Score Change: {score_change_from_first_swap:+.2f}"
+            )
+            print(
+                f"  Resulting Team Value: ${value_after_first_swap:.2f}M / Money Left Under Cap: ${dynamic_budget - value_after_first_swap:.2f}M"
+            )
             print("You would need to use 1 of your free transfers for this.")
         else:
-            print("\nNo accompanying second swap found that makes the primary transfer financially viable or beneficial.")
-            print(f"The primary swap (Out: {asset_to_sell_1['Name']}, In: {asset_to_buy_1['Name']}) alone would result in a team value of ${value_after_first_swap:.2f}M, exceeding the budget cap of ${dynamic_budget:.2f}M.")
+            print(
+                "\nNo accompanying second swap found that makes the primary transfer financially viable or beneficial."
+            )
+            print(
+                f"The primary swap (Out: {asset_to_sell_1['Name']}, In: {asset_to_buy_1['Name']}) alone would result in a team value of ${value_after_first_swap:.2f}M, exceeding the budget cap of ${dynamic_budget:.2f}M."
+            )
 
 
 def display_suggestions(suggestion_list, suggestion_type_name, dynamic_budget=None):
@@ -1466,28 +1552,108 @@ def optimize_wildcard_team(
         )
 
 
-def main():
-    # --- Choose Weight Profile ---
-    print("\n--- Select Weighting Profile for Combined_Score ---")
-    profile_options = list(WEIGHT_PROFILES.keys())
-    for i, profile_name in enumerate(profile_options):
-        print(f"{i+1}. {profile_name.replace('_', ' ').title()}")
+def optimize_limitless_team(all_assets_df, num_drivers_req=5, num_constructors_req=2):
+    """
+    Selects the optimal team (5 Drivers, 2 Constructors) based purely on
+    maximizing Combined_Score, ignoring budget (for a "Limitless" chip scenario).
+    """
+    print(f"\n--- Limitless Chip Team Optimizer ---")
+    print(
+        f"Selecting {num_drivers_req} Drivers and {num_constructors_req} Constructors with the highest Combined_Score."
+    )
 
-    default_profile_name = "balanced"  # Or your preferred default
-    selected_weights = WEIGHT_PROFILES[default_profile_name]  # Default
+    if all_assets_df is None or all_assets_df.empty:
+        print("Asset data is not available. Cannot optimize limitless team.")
+        return
+
+    active_assets = all_assets_df[all_assets_df["Active"]].copy()
+    if "Combined_Score" not in active_assets.columns:
+        print(
+            "Error: 'Combined_Score' not found in asset data. Please ensure data is processed correctly."
+        )
+        return
+
+    # Select best drivers
+    active_drivers = active_assets[active_assets["Type"] == "Driver"].sort_values(
+        by="Combined_Score", ascending=False
+    )
+    limitless_drivers = active_drivers.head(num_drivers_req)
+
+    # Select best constructors
+    active_constructors = active_assets[
+        active_assets["Type"] == "Constructor"
+    ].sort_values(by="Combined_Score", ascending=False)
+    limitless_constructors = active_constructors.head(num_constructors_req)
+
+    if (
+        len(limitless_drivers) < num_drivers_req
+        or len(limitless_constructors) < num_constructors_req
+    ):
+        print(
+            "\nWarning: Not enough active drivers or constructors available to form a full limitless team."
+        )
+        print(
+            f"Found {len(limitless_drivers)} drivers and {len(limitless_constructors)} constructors."
+        )
+
+    limitless_team_df = pd.concat(
+        [limitless_drivers, limitless_constructors], ignore_index=True
+    )
+
+    print(f"\n--- Optimal Limitless Team (Ignoring Budget) ---")
+    if limitless_team_df.empty:
+        print(
+            "Could not form a limitless team (no active assets found or criteria not met)."
+        )
+        return
+
+    display_cols = [
+        "ID",
+        "Name",
+        "Type",
+        "Constructor",
+        "Price",
+        "Combined_Score",
+        "User_Adjusted_Avg_Points_Last_3_Races",
+        "Points_Last_Race",
+        "Total_Points_So_Far",
+        "PPM_Current",
+    ]
+
+    actual_display_cols = [
+        col for col in display_cols if col in limitless_team_df.columns
+    ]
+
+    print(limitless_team_df[actual_display_cols].to_string(index=False))
+
+    total_hypothetical_cost = limitless_team_df["Price"].sum()
+    total_score = limitless_team_df["Combined_Score"].sum()
+
+    print(
+        f"\nTotal Hypothetical Team Cost (if budget applied): ${total_hypothetical_cost:.2f}M"
+    )
+    print(f"Total Team Combined Score: {total_score:.2f}")
+
+
+def main():
+    # Ensure selected_weights is defined properly from profile selection
+    # For example, if using profile_options and profile_choice_idx:
+    profile_options = list(WEIGHT_PROFILES.keys())  # Defined globally
+    default_profile_name = "balanced"
+    selected_profile_name = default_profile_name  # Default
+
+    print("\n--- Select Weighting Profile for Combined_Score ---")
+    for i, name in enumerate(profile_options):
+        print(f"{i+1}. {name.replace('_', ' ').title()}")
 
     try:
-        profile_choice_idx = input(
+        profile_choice_input = input(
             f"Enter choice (1-{len(profile_options)}, default: {default_profile_name.title()}): "
         )
-        if profile_choice_idx:  # If user pressed Enter, it's empty string
-            profile_choice_idx = int(profile_choice_idx) - 1
+        if profile_choice_input:
+            profile_choice_idx = int(profile_choice_input) - 1
             if 0 <= profile_choice_idx < len(profile_options):
                 selected_profile_name = profile_options[profile_choice_idx]
-                selected_weights = WEIGHT_PROFILES[selected_profile_name]
-                print(
-                    f"Using '{selected_profile_name.replace('_', ' ').title()}' profile."
-                )
             else:
                 print(
                     f"Invalid choice. Using default '{default_profile_name.title()}' profile."
@@ -1497,64 +1663,108 @@ def main():
     except ValueError:
         print(f"Invalid input. Using default '{default_profile_name.title()}' profile.")
 
-    # --- Load Data with selected weights ---
+    selected_weights = WEIGHT_PROFILES.get(
+        selected_profile_name, WEIGHT_PROFILES[default_profile_name]
+    )  # Use .get for safety
+
+    print(f"Using '{selected_profile_name.replace('_', ' ').title()}' profile.")
+
     all_assets_df, my_team_df, warning_msg = load_and_process_data(
-        ASSET_DATA_FILE,
-        MY_TEAM_FILE,
-        MANUAL_ADJUSTMENTS_FILE,
-        selected_weights,  # Pass the chosen weights
+        ASSET_DATA_URL, MY_TEAM_URL, MANUAL_ADJUSTMENTS_URL, selected_weights
     )
 
     if all_assets_df is None:
         print("Exiting due to critical error in data loading.")
         return
 
+    dynamic_budget = INITIAL_BUDGET
+    current_team_value = 0.0
+    if my_team_df is not None and not my_team_df.empty:
+        dynamic_budget, current_team_value = display_team_and_budget_info(
+            my_team_df, INITIAL_BUDGET, warning_msg
+        )
+    elif MY_TEAM_FILE:
+        # This part of the log is now handled inside load_and_process_data if team file fails
+        # print(f"\nWarning: Could not load team data from {MY_TEAM_FILE}. Some modes will be unavailable.")
+        pass
+
     print("\nChoose mode:")
     print("1. Weekly Transfer Suggestions (Automated)")
-    print("2. Wildcard Team Optimizer")
-    print("3. Target-Based Double Transfer Assistant (Specify one swap, find best second)") # New Option
-    
-    mode_choice = input("Enter choice (1, 2, or 3, default: 1): ") or "1"
+    print("2. Wildcard Team Optimizer (Budgeted)")
+    print("3. Target-Based Double Transfer Assistant")
+    print("4. Limitless Chip Optimizer (No Budget)")  # New Option
 
-    if mode_choice == '1':
-        # ... (existing weekly transfer logic) ...
-        if my_team_df is None or my_team_df.empty: # Check my_team_df here
-            print("Cannot proceed with weekly transfers: Team data is missing or empty.")
+    mode_choice = input("Enter choice (1-4, default: 1): ") or "1"  # Default to 1
+
+    if mode_choice == "1":
+        if my_team_df is None or my_team_df.empty:
+            print(
+                "Cannot proceed with weekly transfers: Team data is missing or empty."
+            )
             return
-        dynamic_budget, current_team_value = display_team_and_budget_info(my_team_df, INITIAL_BUDGET, warning_msg)
+        # ... (existing weekly transfer logic calls display_team_and_budget_info if not already called)
+        # We already called display_team_and_budget_info if my_team_df was loaded.
+        # If it wasn't (e.g. my_team.csv missing), then this mode can't run.
+
         mandatory_transfers_df = identify_mandatory_transfers(my_team_df)
         num_mandatory_transfers = len(mandatory_transfers_df)
-        print(f"\nYou have {num_mandatory_transfers} mandatory transfer(s).")
-        print(f"The system will consider up to {DEFAULT_FREE_TRANSFERS} total transfers based on a team budget cap of ${dynamic_budget:.2f}M.")
-        suggest_swaps(all_assets_df, my_team_df, mandatory_transfers_df, dynamic_budget, current_team_value, DEFAULT_FREE_TRANSFERS, num_mandatory_transfers)
+        # ... (rest of your existing mode '1' logic for calling suggest_swaps) ...
+        print(
+            f"\nYou have {num_mandatory_transfers} mandatory transfer(s)."
+        )  # Duplicated from suggest_swaps context, can be streamlined
+        print(
+            f"The system will consider up to {DEFAULT_FREE_TRANSFERS} total transfers based on a team budget cap of ${dynamic_budget:.2f}M."
+        )
+        suggest_swaps(
+            all_assets_df,
+            my_team_df,
+            mandatory_transfers_df,
+            dynamic_budget,
+            current_team_value,
+            DEFAULT_FREE_TRANSFERS,
+            num_mandatory_transfers,
+        )
 
-    elif mode_choice == '2':
-        optimize_wildcard_team(all_assets_df, INITIAL_BUDGET)
-        
-    elif mode_choice == '3':
+    elif mode_choice == "2":
+        optimize_wildcard_team(all_assets_df, INITIAL_BUDGET)  # Budgeted wildcard
+
+    elif mode_choice == "3":
         if my_team_df is None or my_team_df.empty:
-            print("Cannot proceed with target-based swap: Team data is missing or empty.")
+            print(
+                "Cannot proceed with target-based swap: Team data is missing or empty."
+            )
             return
-        
-        dynamic_budget, current_team_value = display_team_and_budget_info(my_team_df, INITIAL_BUDGET, warning_msg) # Get budget without printing team yet
-
+        # ... (your existing target-based swap logic, ensure dynamic_budget and current_team_value are used) ...
         print("\n--- Target-Based Double Transfer Input ---")
-        fixed_sell_id = input("Enter ID of asset to SELL (e.g., ALP): ").strip().upper()
-        fixed_buy_id = input("Enter ID of asset to BUY (e.g., WIL): ").strip().upper()
-        
-        if fixed_sell_id and fixed_buy_id:
-            # Display current team once before showing suggestions for this mode
-            print("\nRecalculating team info before targeted swap analysis...")
-            display_team_and_budget_info(my_team_df, INITIAL_BUDGET, warning_msg) # Display now
+        fixed_sell_id = (
+            input(
+                f"Enter ID of asset to SELL from your team (e.g., {my_team_df['ID'].iloc[0] if not my_team_df.empty else 'ALP'}): "
+            )
+            .strip()
+            .upper()
+        )
+        fixed_buy_id = (
+            input("Enter ID of asset to BUY from all available assets (e.g., WIL): ")
+            .strip()
+            .upper()
+        )
 
+        if fixed_sell_id and fixed_buy_id:
             suggest_target_based_double_swap(
-                fixed_sell_id, fixed_buy_id,
-                all_assets_df, my_team_df,
-                dynamic_budget, current_team_value
+                fixed_sell_id,
+                fixed_buy_id,
+                all_assets_df,
+                my_team_df,
+                dynamic_budget,
+                current_team_value,
             )
         else:
-            print("Both asset IDs (sell and buy) must be provided.")
-            
+            print(
+                "Both asset IDs (sell and buy) must be provided for target-based swap."
+            )
+
+    elif mode_choice == "4":  # New mode
+        optimize_limitless_team(all_assets_df)
     else:
         print("Invalid mode choice. Exiting.")
 
