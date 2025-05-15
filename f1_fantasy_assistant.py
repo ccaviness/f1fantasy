@@ -13,9 +13,11 @@ MANUAL_ADJUSTMENTS_FILE = "manual_adjustments.csv"
 METADATA_COLUMNS = ["ID", "Name", "Type", "Constructor", "Price", "Active"]
 DEFAULT_FREE_TRANSFERS = 2  # Standard free transfers per week, can be adjusted
 
-# Weights for Combined Score (should sum to 1.0 if desired, but not strictly necessary for ranking improvement)
-WEIGHT_RECENT_FORM = 0.6  # For Avg_Points_Last_3_Races
-WEIGHT_PPM = 0.4  # For PPM_Current
+# Weights for Combined Score
+# (Aim for these to sum to 1.0 for balanced contribution of normalized scores)
+WEIGHT_RECENT_FORM = 0.5  # For User_Adjusted_Avg_Points_Last_3_Races
+WEIGHT_LAST_RACE = 0.2  # For Points_Last_Race
+WEIGHT_PPM = 0.3  # For PPM_Current
 
 
 def _load_raw_asset_df(asset_file_path):
@@ -164,12 +166,15 @@ def _apply_manual_adjustments(df, adjustments_file_path):
     return df, warnings
 
 
-def _calculate_derived_scores(df):
-    """Calculates PPM_Current and Combined_Score."""
+def _calculate_derived_scores(
+    df,
+):  # df here is asset_data_df after previous processing steps
+    """Calculates PPM_Current and Combined_Score including Points_Last_Race."""
     warnings = ""
     # Calculate PPM_Current
     df["PPM_Current"] = 0.0
     if "Price" in df.columns and "Total_Points_So_Far" in df.columns:
+        # Ensure Price is numeric and notna before this step
         non_zero_price_mask = (df["Price"].notna()) & (df["Price"] != 0)
         df.loc[non_zero_price_mask, "PPM_Current"] = (
             df.loc[non_zero_price_mask, "Total_Points_So_Far"]
@@ -177,31 +182,62 @@ def _calculate_derived_scores(df):
         )
         df["PPM_Current"] = df["PPM_Current"].replace([np.inf, -np.inf], 0).fillna(0)
     else:
-        warnings += "\nWarning: 'Price' or 'Total_Points_So_Far' missing for PPM_Current calculation."
+        warnings += "\nWarning: 'Price' or 'Total_Points_So_Far' missing for PPM_Current calculation. PPM_Current set to 0."
 
-    # Calculate Combined Score
+    # Initialize score columns
     df["Combined_Score"] = 0.0
-    df["Norm_Avg_Points_Last_3"] = 0.5
+    df["Norm_User_Adjusted_Avg_Points_Last_3"] = 0.5  # Renamed for clarity
+    df["Norm_Points_Last_Race"] = 0.5  # New normalized column
     df["Norm_PPM"] = 0.5
 
     for asset_type in ["Driver", "Constructor"]:
         type_mask = df["Type"] == asset_type
         if type_mask.sum() > 0:
-            # Use 'User_Adjusted_Avg_Points_Last_3_Races' which should exist from _apply_manual_adjustments
-            avg_points_series = df.loc[
-                type_mask, "User_Adjusted_Avg_Points_Last_3_Races"
-            ].fillna(0)
-            df.loc[type_mask, "Norm_Avg_Points_Last_3"] = normalize_series(
-                avg_points_series
-            )
+            # Normalize User_Adjusted_Avg_Points_Last_3_Races
+            # This column should exist from _apply_manual_adjustments
+            if "User_Adjusted_Avg_Points_Last_3_Races" in df.columns:
+                avg_points_series = df.loc[
+                    type_mask, "User_Adjusted_Avg_Points_Last_3_Races"
+                ].fillna(0)
+                df.loc[type_mask, "Norm_User_Adjusted_Avg_Points_Last_3"] = (
+                    normalize_series(avg_points_series)
+                )
+            else:
+                warnings += f"\nWarning: 'User_Adjusted_Avg_Points_Last_3_Races' not found for {asset_type}. Using default normalization."
+                # Norm_User_Adjusted_Avg_Points_Last_3 remains 0.5
 
-            ppm_series = df.loc[type_mask, "PPM_Current"].fillna(0)
+            # Normalize Points_Last_Race
+            # This column should exist from _calculate_points_metrics
+            if "Points_Last_Race" in df.columns:
+                last_race_series = df.loc[type_mask, "Points_Last_Race"].fillna(0)
+                df.loc[type_mask, "Norm_Points_Last_Race"] = normalize_series(
+                    last_race_series
+                )
+            else:
+                warnings += f"\nWarning: 'Points_Last_Race' not found for {asset_type}. Using default normalization."
+                # Norm_Points_Last_Race remains 0.5
+
+            # Normalize PPM_Current
+            ppm_series = df.loc[type_mask, "PPM_Current"].fillna(
+                0
+            )  # PPM_Current is calculated above
             df.loc[type_mask, "Norm_PPM"] = normalize_series(ppm_series)
 
-            df.loc[type_mask, "Combined_Score"] = WEIGHT_RECENT_FORM * df.loc[
-                type_mask, "Norm_Avg_Points_Last_3"
-            ].fillna(0.5) + WEIGHT_PPM * df.loc[type_mask, "Norm_PPM"].fillna(0.5)
-    df["Combined_Score"] = df["Combined_Score"].fillna(0)
+            # Calculate Combined Score using .loc for assignment
+            # Fill NaNs for normalized columns just in case (e.g., if a type had only one asset, normalize_series returns all 0.5)
+            norm_avg3 = df.loc[
+                type_mask, "Norm_User_Adjusted_Avg_Points_Last_3"
+            ].fillna(0.5)
+            norm_last_race = df.loc[type_mask, "Norm_Points_Last_Race"].fillna(0.5)
+            norm_ppm = df.loc[type_mask, "Norm_PPM"].fillna(0.5)
+
+            df.loc[type_mask, "Combined_Score"] = (
+                WEIGHT_RECENT_FORM * norm_avg3
+                + WEIGHT_LAST_RACE * norm_last_race  # Added new component
+                + WEIGHT_PPM * norm_ppm
+            )
+
+    df["Combined_Score"] = df["Combined_Score"].fillna(0)  # Final safety fill
     return df, warnings
 
 
@@ -602,6 +638,30 @@ def suggest_swaps(
 
                     if not improved_options.empty:
                         current_best_buy_for_this_sell = improved_options.iloc[0]
+                        # if (
+                        #     current_best_buy_for_this_sell["Improvement_Score_Combined"]
+                        #     > highest_improvement_score_this_iteration
+                        # ):
+                        #     highest_improvement_score_this_iteration = (
+                        #         current_best_buy_for_this_sell[
+                        #             "Improvement_Score_Combined"
+                        #         ]
+                        #     )
+                        #     # Store relevant details for the suggestion
+                        #     best_swap_this_iteration = {
+                        #         "sell_id": sell_id,
+                        #         "sell_name": sell_name,
+                        #         "sell_price": sell_price,
+                        #         "sell_type": sell_type,
+                        #         "sell_score": sell_combined_score,  # Storing score
+                        #         "buy_id": current_best_buy_for_this_sell["ID"],
+                        #         "buy_name": current_best_buy_for_this_sell["Name"],
+                        #         "buy_price": current_best_buy_for_this_sell["Price"],
+                        #         "buy_score": current_best_buy_for_this_sell[
+                        #             "Combined_Score"
+                        #         ],  # Storing score
+                        #         "improvement_score": highest_improvement_score_this_iteration,  # This is Combined Improvement
+                        #     }
                         if (
                             current_best_buy_for_this_sell["Improvement_Score_Combined"]
                             > highest_improvement_score_this_iteration
@@ -611,20 +671,33 @@ def suggest_swaps(
                                     "Improvement_Score_Combined"
                                 ]
                             )
-                            # Store relevant details for the suggestion
                             best_swap_this_iteration = {
                                 "sell_id": sell_id,
                                 "sell_name": sell_name,
                                 "sell_price": sell_price,
                                 "sell_type": sell_type,
-                                "sell_score": sell_combined_score,  # Storing score
+                                "sell_score": asset_to_sell_row[
+                                    "Combined_Score"
+                                ],  # Get score from the row being sold
+                                "sell_avg_points_raw": asset_to_sell_row[
+                                    "Avg_Points_Last_3_Races"
+                                ],  # For display
+                                "sell_last_race_raw": asset_to_sell_row[
+                                    "Points_Last_Race"
+                                ],  # ADDED FOR DISPLAY
                                 "buy_id": current_best_buy_for_this_sell["ID"],
                                 "buy_name": current_best_buy_for_this_sell["Name"],
                                 "buy_price": current_best_buy_for_this_sell["Price"],
                                 "buy_score": current_best_buy_for_this_sell[
                                     "Combined_Score"
-                                ],  # Storing score
-                                "improvement_score": highest_improvement_score_this_iteration,  # This is Combined Improvement
+                                ],
+                                "buy_avg_points_raw": current_best_buy_for_this_sell[
+                                    "Avg_Points_Last_3_Races"
+                                ],  # For display
+                                "buy_last_race_raw": current_best_buy_for_this_sell[
+                                    "Points_Last_Race"
+                                ],  # ADDED FOR DISPLAY
+                                "improvement_score": highest_improvement_score_this_iteration,
                             }
 
             if best_swap_this_iteration:
@@ -758,7 +831,6 @@ def display_suggestions(
         )
 
         for i, swap in enumerate(suggestion_list):
-            # Accessing the stored scores, and raw points for context
             sell_score_display = (
                 f"{swap.get('sell_score', 'N/A'):.2f}"
                 if isinstance(swap.get("sell_score"), (int, float))
@@ -786,11 +858,23 @@ def display_suggestions(
                 else "N/A"
             )
 
+            # Fetch Points_Last_Race for display (assuming it's in the swap dictionary, which suggest_swaps should add)
+            sell_last_race_raw_display = (
+                f"{swap.get('sell_last_race_raw', 'N/A'):.1f}"
+                if isinstance(swap.get("sell_last_race_raw"), (int, float))
+                else "N/A"
+            )
+            buy_last_race_raw_display = (
+                f"{swap.get('buy_last_race_raw', 'N/A'):.1f}"
+                if isinstance(swap.get("buy_last_race_raw"), (int, float))
+                else "N/A"
+            )
+
             print(
-                f"\n{i+1}. Swap Out: {swap['sell_name']} (ID: {swap['sell_id']}, Price: ${swap['sell_price']:.1f}M, Score: {sell_score_display}, AvgL3Raw: {sell_avg_raw_display})"
+                f"\n{i+1}. Swap Out: {swap['sell_name']} (ID: {swap['sell_id']}, Price: ${swap['sell_price']:.1f}M, Score: {sell_score_display}, AvgL3: {sell_avg_raw_display}, LastR: {sell_last_race_raw_display})"
             )
             print(
-                f"   Swap In:  {swap['buy_name']} (ID: {swap['buy_id']}, Price: ${swap['buy_price']:.1f}M, Score: {buy_score_display}, AvgL3Raw: {buy_avg_raw_display})"
+                f"   Swap In:  {swap['buy_name']} (ID: {swap['buy_id']}, Price: ${swap['buy_price']:.1f}M, Score: {buy_score_display}, AvgL3: {buy_avg_raw_display}, LastR: {buy_last_race_raw_display})"
             )
             print(f"   Combined Score Improvement: +{improvement_score_display}")
             print(
