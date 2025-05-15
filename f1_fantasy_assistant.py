@@ -1,3 +1,6 @@
+# This script is a Python module for managing and analyzing F1 Fantasy teams.
+
+import itertools
 import os
 import pandas as pd
 import numpy as np
@@ -735,6 +738,108 @@ def _suggest_sequential_single_discretionary_swaps(
     return final_discretionary_sequence
 
 
+def _suggest_true_double_discretionary_swaps(
+    current_my_team_df,
+    initial_available_for_purchase_df,
+    all_assets_df_complete,
+    dynamic_budget,
+    initial_current_team_value,
+):
+    """
+    Suggests true double swaps (2 out, 2 in) if beneficial.
+    """
+    true_double_swap_suggestions = []
+
+    # Consider only active members of the current team for selling
+    active_team_members_df = current_my_team_df[current_my_team_df["Active"]].copy()
+
+    if len(active_team_members_df) < 2:
+        return []  # Not enough players to perform a double swap
+
+    budget_headroom = dynamic_budget - initial_current_team_value
+
+    # Iterate through all unique pairs of assets to sell from the active team
+    for s1_details, s2_details in itertools.combinations(
+        active_team_members_df.to_dict("records"), 2
+    ):
+        sell_pair_ids = {s1_details["ID"], s2_details["ID"]}
+        sell_pair_price = s1_details["Price"] + s2_details["Price"]
+        sell_pair_combined_score = (
+            s1_details["Combined_Score"] + s2_details["Combined_Score"]
+        )
+
+        type_needed1 = s1_details["Type"]
+        type_needed2 = s2_details["Type"]
+
+        max_combined_buy_price = sell_pair_price + budget_headroom
+
+        # Filter available assets for the first buy candidate (B1)
+        # Must not be one of the players being sold (already handled by initial_available_for_purchase_df)
+        candidates_b1_df = initial_available_for_purchase_df[
+            initial_available_for_purchase_df["Type"] == type_needed1
+        ].copy()
+
+        for _, b1_details_row in candidates_b1_df.iterrows():
+            b1_details = b1_details_row.to_dict()
+            price_b1 = b1_details["Price"]
+
+            # Max price for the second buy candidate (B2)
+            max_price_for_b2 = max_combined_buy_price - price_b1
+            if max_price_for_b2 < 0:  # Not enough budget left for any B2
+                continue
+
+            # Filter available assets for the second buy candidate (B2)
+            # Must not be B1 and must match type_needed2
+            candidates_b2_df = initial_available_for_purchase_df[
+                (initial_available_for_purchase_df["Type"] == type_needed2)
+                & (
+                    initial_available_for_purchase_df["ID"] != b1_details["ID"]
+                )  # Cannot be the same as B1
+                & (initial_available_for_purchase_df["Price"] <= max_price_for_b2)
+            ].copy()
+
+            for _, b2_details_row in candidates_b2_df.iterrows():
+                b2_details = b2_details_row.to_dict()
+
+                buy_pair_price = price_b1 + b2_details["Price"]
+                buy_pair_combined_score = (
+                    b1_details["Combined_Score"] + b2_details["Combined_Score"]
+                )
+
+                improvement_score = buy_pair_combined_score - sell_pair_combined_score
+
+                if improvement_score > 0:  # Only consider beneficial swaps
+                    new_team_total_value = (
+                        initial_current_team_value - sell_pair_price + buy_pair_price
+                    )
+                    money_left_under_cap = dynamic_budget - new_team_total_value
+
+                    true_double_swap_suggestions.append(
+                        {
+                            "sell1": s1_details,
+                            "sell2": s2_details,
+                            "buy1": b1_details,
+                            "buy2": b2_details,
+                            "improvement_score": improvement_score,
+                            "new_team_value": new_team_total_value,
+                            "money_left_under_cap": money_left_under_cap,
+                            "sell_pair_price": sell_pair_price,
+                            "buy_pair_price": buy_pair_price,
+                        }
+                    )
+
+    # Sort all found double swaps by their improvement score
+    if true_double_swap_suggestions:
+        sorted_double_swaps = sorted(
+            true_double_swap_suggestions,
+            key=lambda x: x["improvement_score"],
+            reverse=True,
+        )
+        return sorted_double_swaps[:5]  # Return top 5 (or configurable number)
+
+    return []
+
+
 def suggest_swaps(
     all_assets_df,
     my_team_df,
@@ -750,10 +855,9 @@ def suggest_swaps(
     suggestions = {
         "mandatory": [],
         "discretionary_sequence": [],
-        "double_swaps": [],
-    }  # For future
+        "true_double_swaps": [],
+    }
 
-    # If DataFrames are None or empty, don't proceed with suggestions
     if all_assets_df is None or my_team_df is None or my_team_df.empty:
         print("Cannot generate suggestions: missing asset data or team data.")
         return suggestions
@@ -765,38 +869,36 @@ def suggest_swaps(
 
     # --- 1. Handle Mandatory Transfers ---
     if num_mandatory_transfers > 0:
-        print("\n--- Suggestions for Mandatory Replacements ---")  # Title moved here
+        # ... (your existing mandatory transfer logic call) ...
+        print("\n--- Suggestions for Mandatory Replacements ---")
         mandatory_replacement_suggestions = _suggest_mandatory_replacements(
             mandatory_transfers_df,
-            initial_available_for_purchase_df,  # Use initial available pool
+            initial_available_for_purchase_df,
             dynamic_budget,
             current_team_value,
-            all_assets_df,  # Pass full asset list for details if needed by display
+            all_assets_df,
         )
         suggestions["mandatory"] = mandatory_replacement_suggestions
         if suggestions["mandatory"]:
             display_suggestions(
                 suggestions["mandatory"], "Mandatory Replacements", dynamic_budget
             )
-        else:  # Should be covered by messages within _suggest_mandatory_replacements
-            print(
-                "No suitable mandatory replacements found or no mandatory transfers were flagged (check logic)."
-            )
 
-    # --- 2. Handle Sequential Discretionary Single Swaps ---
+    # --- 2. Determine available discretionary transfers ---
     num_discretionary_transfers_available = (
         num_total_transfers_allowed - num_mandatory_transfers
     )
 
+    # --- 3. Handle Sequential Discretionary Single Swaps ---
+    # We can still offer this, especially if only 1 discretionary transfer is available
     if num_discretionary_transfers_available > 0:
         print(
             f"\n--- Sequential Suggestions for up to {num_discretionary_transfers_available} Discretionary Single Swap(s) (Using Combined Score) ---"
         )
-
         discretionary_sequence = _suggest_sequential_single_discretionary_swaps(
-            my_team_df,  # Pass the original current team
-            initial_available_for_purchase_df,  # Pass the initial available pool
-            all_assets_df,  # Pass the complete asset data for lookups
+            my_team_df,
+            initial_available_for_purchase_df,
+            all_assets_df,
             dynamic_budget,
             current_team_value,
             num_discretionary_transfers_available,
@@ -808,7 +910,28 @@ def suggest_swaps(
                 "Discretionary Single Swaps",
                 dynamic_budget,
             )
-        # The 'no beneficial swaps found' message is now handled within _suggest_sequential_single_discretionary_swaps
+        # Message for no beneficial swaps is now inside _suggest_sequential_single_discretionary_swaps
+
+    # --- 4. Handle True Double Discretionary Swaps ---
+    # Only suggest double swaps if 2 discretionary transfers are actually available
+    if num_discretionary_transfers_available == 2:
+        print(f"\n--- Suggestions for True Double Swap (2 out, 2 in) ---")
+        double_swap_suggestions = _suggest_true_double_discretionary_swaps(
+            my_team_df,  # Pass the original current team
+            initial_available_for_purchase_df,  # Pass the initial available pool
+            all_assets_df,  # Pass the complete asset data for lookups
+            dynamic_budget,
+            current_team_value,
+        )
+        suggestions["true_double_swaps"] = double_swap_suggestions
+        if suggestions["true_double_swaps"]:
+            display_suggestions(
+                suggestions["true_double_swaps"], "True Double Swaps", dynamic_budget
+            )
+        else:
+            print(
+                "No beneficial true double swaps found based on Combined Score and current budget."
+            )
 
     return suggestions
 
@@ -909,6 +1032,42 @@ def display_suggestions(
                 f"   Swap In:  {swap['buy_name']} (ID: {swap['buy_id']}, Price: ${swap['buy_price']:.1f}M, Score: {buy_score_display}, AvgL3: {buy_avg_raw_display}, LastR: {buy_last_race_raw_display})"
             )
             print(f"   Combined Score Improvement: +{improvement_score_display}")
+            print(
+                f"   Resulting Team Value: ${swap['new_team_value']:.2f}M / Money Left Under Cap: ${swap['money_left_under_cap']:.2f}M"
+            )
+    elif suggestion_type_name == "True Double Swaps":
+        title_cap_info = (
+            f" (Team Budget Cap: ${dynamic_budget:.2f}M)"
+            if dynamic_budget is not None
+            else ""
+        )
+        print(
+            f"\nTop {len(suggestion_list)} True Double Swap Option(s){title_cap_info}:"
+        )
+
+        for i, swap in enumerate(suggestion_list):
+            s1 = swap["sell1"]
+            s2 = swap["sell2"]
+            b1 = swap["buy1"]
+            b2 = swap["buy2"]
+
+            print(f"\n{i+1}. Sell Pair:")
+            print(
+                f"   Out: {s1['Name']} (ID: {s1['ID']}, Price: ${s1['Price']:.1f}M, Score: {s1['Combined_Score']:.2f})"
+            )
+            print(
+                f"   Out: {s2['Name']} (ID: {s2['ID']}, Price: ${s2['Price']:.1f}M, Score: {s2['Combined_Score']:.2f})"
+            )
+            print(f"   Combined Sell Price: ${swap['sell_pair_price']:.1f}M")
+            print(f"   Buy Pair:")
+            print(
+                f"   In:  {b1['Name']} (ID: {b1['ID']}, Price: ${b1['Price']:.1f}M, Score: {b1['Combined_Score']:.2f})"
+            )
+            print(
+                f"   In:  {b2['Name']} (ID: {b2['ID']}, Price: ${b2['Price']:.1f}M, Score: {b2['Combined_Score']:.2f})"
+            )
+            print(f"   Combined Buy Price: ${swap['buy_pair_price']:.1f}M")
+            print(f"   Combined Score Improvement: +{swap['improvement_score']:.2f}")
             print(
                 f"   Resulting Team Value: ${swap['new_team_value']:.2f}M / Money Left Under Cap: ${swap['money_left_under_cap']:.2f}M"
             )
