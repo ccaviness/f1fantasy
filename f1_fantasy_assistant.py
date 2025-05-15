@@ -17,11 +17,36 @@ MANUAL_ADJUSTMENTS_FILE = "manual_adjustments.csv"
 METADATA_COLUMNS = ["ID", "Name", "Type", "Constructor", "Price", "Active"]
 DEFAULT_FREE_TRANSFERS = 2  # Standard free transfers per week, can be adjusted
 
-# Weights for Combined Score
-# (Aim for these to sum to 1.0 for balanced contribution of normalized scores)
-WEIGHT_RECENT_FORM = 0.5  # For User_Adjusted_Avg_Points_Last_3_Races
-WEIGHT_LAST_RACE = 0.2  # For Points_Last_Race
-WEIGHT_PPM = 0.3  # For PPM_Current
+# Define keys for weights consistently
+KEY_RECENT_FORM = "recent_form"
+KEY_LAST_RACE = "last_race"
+KEY_PPM = "ppm"
+KEY_TOTAL_POINTS = "total_points"
+KEY_TREND = "trend"
+
+WEIGHT_PROFILES = {
+    "balanced": {
+        KEY_RECENT_FORM: 0.30,
+        KEY_LAST_RACE: 0.20,
+        KEY_PPM: 0.25,
+        KEY_TOTAL_POINTS: 0.15,
+        KEY_TREND: 0.10,
+    },
+    "aggressive_form": {  # Emphasizes recent performance and momentum
+        KEY_RECENT_FORM: 0.40,
+        KEY_LAST_RACE: 0.30,
+        KEY_PPM: 0.10,
+        KEY_TOTAL_POINTS: 0.10,
+        KEY_TREND: 0.10,
+    },
+    "value_focused": {  # Emphasizes PPM and overall consistency
+        KEY_RECENT_FORM: 0.15,
+        KEY_LAST_RACE: 0.10,
+        KEY_PPM: 0.40,
+        KEY_TOTAL_POINTS: 0.25,
+        KEY_TREND: 0.10,
+    },
+}
 
 
 def _load_raw_asset_df(asset_file_path):
@@ -170,15 +195,14 @@ def _apply_manual_adjustments(df, adjustments_file_path):
     return df, warnings
 
 
-def _calculate_derived_scores(
-    df,
-):  # df here is asset_data_df after previous processing steps
-    """Calculates PPM_Current and Combined_Score including Points_Last_Race."""
+def _calculate_derived_scores(df, selected_weights):  # Added selected_weights parameter
+    """Calculates PPM_Current and an enhanced Combined_Score using provided weights."""
     warnings = ""
-    # Calculate PPM_Current
+
+    # Calculate PPM_Current (assuming 'Price' and 'Total_Points_So_Far' exist and are numeric)
+    # ... (PPM_Current calculation logic remains the same as your current version) ...
     df["PPM_Current"] = 0.0
     if "Price" in df.columns and "Total_Points_So_Far" in df.columns:
-        # Ensure Price is numeric and notna before this step
         non_zero_price_mask = (df["Price"].notna()) & (df["Price"] != 0)
         df.loc[non_zero_price_mask, "PPM_Current"] = (
             df.loc[non_zero_price_mask, "Total_Points_So_Far"]
@@ -186,62 +210,89 @@ def _calculate_derived_scores(
         )
         df["PPM_Current"] = df["PPM_Current"].replace([np.inf, -np.inf], 0).fillna(0)
     else:
-        warnings += "\nWarning: 'Price' or 'Total_Points_So_Far' missing for PPM_Current calculation. PPM_Current set to 0."
+        warnings += "\nWarning: 'Price' or 'Total_Points_So_Far' missing for PPM_Current. PPM_Current set to 0."
+
+    # Calculate Trend_Score
+    if (
+        "Points_Last_Race" in df.columns
+        and "User_Adjusted_Avg_Points_Last_3_Races" in df.columns
+    ):
+        df["Trend_Score"] = (
+            df["Points_Last_Race"] - df["User_Adjusted_Avg_Points_Last_3_Races"]
+        )
+    else:
+        warnings += "\nWarning: Columns for Trend_Score calculation missing. Trend_Score set to 0."
+        df["Trend_Score"] = 0.0
+    df["Trend_Score"] = df["Trend_Score"].fillna(0)
 
     # Initialize score columns
     df["Combined_Score"] = 0.0
-    df["Norm_User_Adjusted_Avg_Points_Last_3"] = 0.5  # Renamed for clarity
-    df["Norm_Points_Last_Race"] = 0.5  # New normalized column
+    df["Norm_User_Adjusted_Avg_Points_Last_3"] = 0.5
+    df["Norm_Points_Last_Race"] = 0.5
     df["Norm_PPM"] = 0.5
+    df["Norm_Total_Points_So_Far"] = 0.5
+    df["Norm_Trend_Score"] = 0.5
 
     for asset_type in ["Driver", "Constructor"]:
         type_mask = df["Type"] == asset_type
         if type_mask.sum() > 0:
-            # Normalize User_Adjusted_Avg_Points_Last_3_Races
-            # This column should exist from _apply_manual_adjustments
-            if "User_Adjusted_Avg_Points_Last_3_Races" in df.columns:
-                avg_points_series = df.loc[
-                    type_mask, "User_Adjusted_Avg_Points_Last_3_Races"
-                ].fillna(0)
-                df.loc[type_mask, "Norm_User_Adjusted_Avg_Points_Last_3"] = (
-                    normalize_series(avg_points_series)
-                )
-            else:
-                warnings += f"\nWarning: 'User_Adjusted_Avg_Points_Last_3_Races' not found for {asset_type}. Using default normalization."
-                # Norm_User_Adjusted_Avg_Points_Last_3 remains 0.5
-
-            # Normalize Points_Last_Race
-            # This column should exist from _calculate_points_metrics
-            if "Points_Last_Race" in df.columns:
-                last_race_series = df.loc[type_mask, "Points_Last_Race"].fillna(0)
-                df.loc[type_mask, "Norm_Points_Last_Race"] = normalize_series(
-                    last_race_series
-                )
-            else:
-                warnings += f"\nWarning: 'Points_Last_Race' not found for {asset_type}. Using default normalization."
-                # Norm_Points_Last_Race remains 0.5
-
-            # Normalize PPM_Current
-            ppm_series = df.loc[type_mask, "PPM_Current"].fillna(
+            # Ensure source columns are filled before normalization
+            df.loc[type_mask, "User_Adjusted_Avg_Points_Last_3_Races"] = df.loc[
+                type_mask, "User_Adjusted_Avg_Points_Last_3_Races"
+            ].fillna(0)
+            df.loc[type_mask, "Points_Last_Race"] = df.loc[
+                type_mask, "Points_Last_Race"
+            ].fillna(0)
+            df.loc[type_mask, "PPM_Current"] = df.loc[type_mask, "PPM_Current"].fillna(
                 0
-            )  # PPM_Current is calculated above
-            df.loc[type_mask, "Norm_PPM"] = normalize_series(ppm_series)
+            )
+            df.loc[type_mask, "Total_Points_So_Far"] = df.loc[
+                type_mask, "Total_Points_So_Far"
+            ].fillna(0)
+            df.loc[type_mask, "Trend_Score"] = df.loc[type_mask, "Trend_Score"].fillna(
+                0
+            )
 
-            # Calculate Combined Score using .loc for assignment
-            # Fill NaNs for normalized columns just in case (e.g., if a type had only one asset, normalize_series returns all 0.5)
+            df.loc[type_mask, "Norm_User_Adjusted_Avg_Points_Last_3"] = (
+                normalize_series(
+                    df.loc[type_mask, "User_Adjusted_Avg_Points_Last_3_Races"]
+                )
+            )
+            df.loc[type_mask, "Norm_Points_Last_Race"] = normalize_series(
+                df.loc[type_mask, "Points_Last_Race"]
+            )
+            df.loc[type_mask, "Norm_PPM"] = normalize_series(
+                df.loc[type_mask, "PPM_Current"]
+            )
+            df.loc[type_mask, "Norm_Total_Points_So_Far"] = normalize_series(
+                df.loc[type_mask, "Total_Points_So_Far"]
+            )
+            df.loc[type_mask, "Norm_Trend_Score"] = normalize_series(
+                df.loc[type_mask, "Trend_Score"]
+            )
+
             norm_avg3 = df.loc[
                 type_mask, "Norm_User_Adjusted_Avg_Points_Last_3"
             ].fillna(0.5)
             norm_last_race = df.loc[type_mask, "Norm_Points_Last_Race"].fillna(0.5)
             norm_ppm = df.loc[type_mask, "Norm_PPM"].fillna(0.5)
+            norm_total = df.loc[type_mask, "Norm_Total_Points_So_Far"].fillna(0.5)
+            norm_trend = df.loc[type_mask, "Norm_Trend_Score"].fillna(0.5)
 
+            # Use weights from the selected_weights dictionary
             df.loc[type_mask, "Combined_Score"] = (
-                WEIGHT_RECENT_FORM * norm_avg3
-                + WEIGHT_LAST_RACE * norm_last_race  # Added new component
-                + WEIGHT_PPM * norm_ppm
+                selected_weights[KEY_RECENT_FORM] * norm_avg3
+                + selected_weights[KEY_LAST_RACE] * norm_last_race
+                + selected_weights[KEY_PPM] * norm_ppm
+                + selected_weights[KEY_TOTAL_POINTS] * norm_total
+                + selected_weights[KEY_TREND] * norm_trend
             )
 
-    df["Combined_Score"] = df["Combined_Score"].fillna(0)  # Final safety fill
+    df["Combined_Score"] = df["Combined_Score"].fillna(0)
+    if warnings:
+        # This print might be too verbose here, consider returning warnings
+        # print(f"Warnings from _calculate_derived_scores: {warnings}")
+        pass
     return df, warnings
 
 
@@ -295,9 +346,13 @@ def _load_and_process_team_df(team_file_path, all_assets_df_processed):
             "Point_Adjustment_Avg3Races",
             "Points_Last_Race",
             "PPM_Current",
+            "Trend_Score",  # Make sure this is added
             "Combined_Score",
-            "Norm_Avg_Points_Last_3",
+            "Norm_User_Adjusted_Avg_Points_Last_3",  # Renamed from Norm_Avg_Points_Last_3
+            "Norm_Points_Last_Race",  # New
             "Norm_PPM",
+            "Norm_Total_Points_So_Far",  # New
+            "Norm_Trend_Score",  # New
         ]
         actual_cols_to_merge = [
             col
@@ -306,8 +361,10 @@ def _load_and_process_team_df(team_file_path, all_assets_df_processed):
         ]
 
         my_team_df = pd.merge(
-            my_team_df_raw[cols_to_select_from_raw],
-            all_assets_df_processed[actual_cols_to_merge],
+            my_team_df_raw[
+                cols_to_select_from_raw
+            ],  # Still just ID or ID, Purchase_Price
+            all_assets_df_processed[actual_cols_to_merge],  # Gets all the rich data
             on="ID",
             how="left",
         )
@@ -341,8 +398,7 @@ def _load_and_process_team_df(team_file_path, all_assets_df_processed):
 
             if my_team_df.isnull().values.any():
                 warnings += "\nWarning: Some assets in your team file may have missing details after merge."
-                # Fill NaNs for key display/logic columns
-                fill_cols = [
+                cols_to_check_fill = [
                     "Price",
                     "Total_Points_So_Far",
                     "Avg_Points_Last_3_Races",
@@ -350,19 +406,30 @@ def _load_and_process_team_df(team_file_path, all_assets_df_processed):
                     "Point_Adjustment_Avg3Races",
                     "Points_Last_Race",
                     "PPM_Current",
+                    "Trend_Score",  # Ensure Trend_Score is here
                     "Combined_Score",
                     "Active",
+                    "Norm_User_Adjusted_Avg_Points_Last_3",
+                    "Norm_Points_Last_Race",
+                    "Norm_PPM",
+                    "Norm_Total_Points_So_Far",
+                    "Norm_Trend_Score",
                 ]
-                for col in fill_cols:
+                for col in cols_to_check_fill:
                     if col in my_team_df.columns:
-                        my_team_df[col] = my_team_df[col].fillna(
-                            0 if my_team_df[col].dtype != "bool" else False
-                        )
-                    elif col not in [
-                        "Purchase_Price",
-                        "PPM_on_Purchase",
-                    ]:  # Ensure column exists before filling
-                        my_team_df[col] = False if col == "Active" else 0.0
+                        if my_team_df[col].isnull().any():
+                            if col == "Active":
+                                my_team_df[col] = my_team_df[col].fillna(False)
+                            else:  # Numeric columns default to 0
+                                my_team_df[col] = my_team_df[col].fillna(0)
+                    # If a column from cols_to_check_fill is entirely missing from my_team_df
+                    # (shouldn't happen if actual_cols_to_merge was correct), add it with defaults.
+                    elif col not in ["Purchase_Price", "PPM_on_Purchase"]:
+                        if col == "Active":
+                            my_team_df[col] = False
+                        else:
+                            my_team_df[col] = 0.0
+                        warnings += f"\nWarning: Column '{col}' was missing in merged team data, defaulted."
 
         elif my_team_df is not None and my_team_df.empty:
             warnings += f"\nWarning: Team data is empty after merge (check IDs in {team_file_path})."
@@ -378,17 +445,17 @@ def _load_and_process_team_df(team_file_path, all_assets_df_processed):
     return my_team_df, warnings
 
 
-def load_and_process_data(asset_file_path, team_file_path, adjustments_file_path):
-    """
-    Orchestrates loading and processing of all data by calling helper functions.
-    """
-    overall_warnings = []  # Use a list to collect warnings
+def load_and_process_data(
+    asset_file_path, team_file_path, adjustments_file_path, selected_weights
+):  # Added selected_weights
+    overall_warnings = []
 
     # 1. Load and validate raw asset data
     asset_data_df, warn = _load_raw_asset_df(asset_file_path)
     if warn:
         overall_warnings.append(warn)
     if asset_data_df is None:
+        # ... (handle critical failure as before) ...
         final_warning_msg = "\n".join(filter(None, overall_warnings))
         if final_warning_msg.strip():
             print(
@@ -396,13 +463,12 @@ def load_and_process_data(asset_file_path, team_file_path, adjustments_file_path
             )
         return None, None, final_warning_msg
 
-    # 2. Preprocess metadata like Price, Active
-    # Use .copy() to avoid SettingWithCopyWarning on slices later
+    # 2. Preprocess metadata
     asset_data_df, warn = _preprocess_asset_attributes(asset_data_df.copy())
     if warn:
         overall_warnings.append(warn)
 
-    # 3. Calculate base points metrics (Total, Avg3, LastRace)
+    # 3. Calculate base points metrics
     asset_data_df, warn = _calculate_points_metrics(
         asset_data_df.copy(), METADATA_COLUMNS
     )
@@ -416,11 +482,14 @@ def load_and_process_data(asset_file_path, team_file_path, adjustments_file_path
     if warn:
         overall_warnings.append(warn)
 
-    # 5. Calculate derived scores (PPM, Combined_Score) - This becomes the final all_assets_df
-    all_assets_df, warn = _calculate_derived_scores(asset_data_df.copy())
+    # 5. Calculate derived scores (PPM, Combined_Score) - Pass selected_weights
+    all_assets_df, warn = _calculate_derived_scores(
+        asset_data_df.copy(), selected_weights
+    )  # Pass weights
     if warn:
         overall_warnings.append(warn)
-    if all_assets_df is None:  # Should not happen if previous steps worked
+    if all_assets_df is None:
+        # ... (handle critical failure as before) ...
         final_warning_msg = "\n".join(filter(None, overall_warnings))
         if final_warning_msg.strip():
             print(
@@ -429,7 +498,9 @@ def load_and_process_data(asset_file_path, team_file_path, adjustments_file_path
         return None, None, final_warning_msg
 
     # 6. Load and process team data
-    my_team_df, warn = _load_and_process_team_df(team_file_path, all_assets_df)
+    my_team_df, warn = _load_and_process_team_df(
+        team_file_path, all_assets_df
+    )  # all_assets_df now has scores based on selected_weights
     if warn:
         overall_warnings.append(warn)
 
@@ -652,11 +723,21 @@ def _suggest_sequential_single_discretionary_swaps(
                             "sell_name": asset_to_sell_row["Name"],
                             "sell_price": sell_price,
                             "sell_type": sell_type,
-                            "sell_score": sell_combined_score,
+                            "sell_score": asset_to_sell_row["Combined_Score"],
                             "sell_avg_points_raw": asset_to_sell_row[
                                 "Avg_Points_Last_3_Races"
                             ],
                             "sell_last_race_raw": asset_to_sell_row["Points_Last_Race"],
+                            # "sell_total_points_raw": asset_to_sell_row[
+                            #     "Total_Points_So_Far"
+                            # ],  # Ensure this is from asset_to_sell_row
+                            # "sell_trend_raw": asset_to_sell_row[
+                            #     "Trend_Score"
+                            # ],  # Ensure this is from asset_to_sell_row
+                            "sell_total_points_raw": asset_to_sell_row.get(
+                                "Total_Points_So_Far", 0.0
+                            ),
+                            "sell_trend_raw": asset_to_sell_row.get("Trend_Score", 0.0),
                             "buy_id": current_best_buy_for_this_sell["ID"],
                             "buy_name": current_best_buy_for_this_sell["Name"],
                             "buy_price": current_best_buy_for_this_sell["Price"],
@@ -669,7 +750,20 @@ def _suggest_sequential_single_discretionary_swaps(
                             "buy_last_race_raw": current_best_buy_for_this_sell[
                                 "Points_Last_Race"
                             ],
+                            # "buy_total_points_raw": current_best_buy_for_this_sell[
+                            #     "Total_Points_So_Far"
+                            # ],  # From current_best_buy_for_this_sell
+                            # "buy_trend_raw": current_best_buy_for_this_sell[
+                            #     "Trend_Score"
+                            # ],  # From current_best_buy_for_this_sell
+                            "buy_total_points_raw": current_best_buy_for_this_sell.get(
+                                "Total_Points_So_Far", 0.0
+                            ),
+                            "buy_trend_raw": current_best_buy_for_this_sell.get(
+                                "Trend_Score", 0.0
+                            ),
                             "improvement_score": highest_improvement_score_this_iteration,
+                            # new_team_value, money_left_under_cap are calculated later in this function
                         }
 
         if best_swap_this_iteration:
@@ -937,9 +1031,7 @@ def suggest_swaps(
     return suggestions
 
 
-def display_suggestions(
-    suggestion_list, suggestion_type_name, dynamic_budget=None
-):  # Added dynamic_budget parameter
+def display_suggestions(suggestion_list, suggestion_type_name, dynamic_budget=None):
     """
     Displays suggestions in a readable format.
     """
@@ -947,36 +1039,38 @@ def display_suggestions(
         return
 
     if suggestion_type_name == "Mandatory Replacements":
+        # ... (your existing mandatory replacements display logic) ...
         for i, suggestion_group in enumerate(suggestion_list):
             asset_to_sell = suggestion_group["sell"]
             options = suggestion_group["options"]
             message = suggestion_group.get("message")
 
             print(
-                f"\n{i+1}. For mandatory sale of: {asset_to_sell['Name']} (ID: {asset_to_sell['ID']}, Price: ${asset_to_sell['Price']:.1f}M)"
+                f"\n{i+1}. For mandatory sale of: {asset_to_sell.get('Name', 'N/A')} (ID: {asset_to_sell.get('ID', 'N/A')}, Price: ${asset_to_sell.get('Price', 0):.1f}M)"
             )
             if message:
                 print(f"   {message}")
             elif not options.empty:
-                print("   Potential replacements (ranked by Avg Points Last 3 Races):")
-                # Ensure all display columns exist for options
+                print(
+                    "   Potential replacements (ranked by Combined Score or Avg Points Last 3 Races):"
+                )
                 opt_display_cols = [
                     "ID",
                     "Name",
                     "Price",
+                    "Combined_Score",
                     "Avg_Points_Last_3_Races",
                     "Total_Points_So_Far",
                 ]
-                for col in opt_display_cols:
-                    if col not in options.columns:
-                        options[col] = "N/A"  # Or np.nan if numeric
-                print(options[opt_display_cols].to_string(index=False))
+                actual_opt_display_cols = [
+                    col for col in opt_display_cols if col in options.columns
+                ]
+                print(options[actual_opt_display_cols].to_string(index=False))
             else:
-                print(
-                    "   No replacement options found (this case should ideally be covered by 'message')."
-                )
+                print("   No replacement options found.")
 
     elif suggestion_type_name == "Discretionary Single Swaps":
+        # ... (your existing discretionary single swaps display logic - this should already be up-to-date) ...
         title_cap_info = (
             f" (Team Budget Cap: ${dynamic_budget:.2f}M)"
             if dynamic_budget is not None
@@ -987,55 +1081,42 @@ def display_suggestions(
         )
 
         for i, swap in enumerate(suggestion_list):
-            sell_score_display = (
-                f"{swap.get('sell_score', 'N/A'):.2f}"
-                if isinstance(swap.get("sell_score"), (int, float))
-                else "N/A"
-            )
-            buy_score_display = (
-                f"{swap.get('buy_score', 'N/A'):.2f}"
-                if isinstance(swap.get("buy_score"), (int, float))
-                else "N/A"
-            )
-            improvement_score_display = (
-                f"{swap.get('improvement_score', 'N/A'):.2f}"
-                if isinstance(swap.get("improvement_score"), (int, float))
-                else "N/A"
-            )
 
-            sell_avg_raw_display = (
-                f"{swap.get('sell_avg_points_raw', 'N/A'):.2f}"
-                if isinstance(swap.get("sell_avg_points_raw"), (int, float))
-                else "N/A"
-            )
-            buy_avg_raw_display = (
-                f"{swap.get('buy_avg_points_raw', 'N/A'):.2f}"
-                if isinstance(swap.get("buy_avg_points_raw"), (int, float))
-                else "N/A"
-            )
+            def format_value(val_key, precision=2, default_val="N/A"):
+                val = swap.get(val_key)
+                if isinstance(val, (int, float)) and not np.isnan(
+                    val
+                ):  # Check for NaN too
+                    return f"{val:.{precision}f}"
+                return default_val
 
-            # Fetch Points_Last_Race for display (assuming it's in the swap dictionary, which suggest_swaps should add)
-            sell_last_race_raw_display = (
-                f"{swap.get('sell_last_race_raw', 'N/A'):.1f}"
-                if isinstance(swap.get("sell_last_race_raw"), (int, float))
-                else "N/A"
-            )
-            buy_last_race_raw_display = (
-                f"{swap.get('buy_last_race_raw', 'N/A'):.1f}"
-                if isinstance(swap.get("buy_last_race_raw"), (int, float))
-                else "N/A"
-            )
+            sell_score_display = format_value("sell_score", 2)
+            buy_score_display = format_value("buy_score", 2)
+            improvement_score_display = format_value("improvement_score", 2)
+
+            sell_avg_raw_display = format_value("sell_avg_points_raw", 2)
+            buy_avg_raw_display = format_value("buy_avg_points_raw", 2)
+
+            sell_last_race_raw_display = format_value("sell_last_race_raw", 1)
+            buy_last_race_raw_display = format_value("buy_last_race_raw", 1)
+
+            sell_total_pts_raw_display = format_value("sell_total_points_raw", 1)
+            buy_total_pts_raw_display = format_value("buy_total_points_raw", 1)
+
+            sell_trend_raw_display = format_value("sell_trend_raw", 1)
+            buy_trend_raw_display = format_value("buy_trend_raw", 1)
 
             print(
-                f"\n{i+1}. Swap Out: {swap['sell_name']} (ID: {swap['sell_id']}, Price: ${swap['sell_price']:.1f}M, Score: {sell_score_display}, AvgL3: {sell_avg_raw_display}, LastR: {sell_last_race_raw_display})"
+                f"\n{i+1}. Swap Out: {swap.get('sell_name','N/A')} (ID: {swap.get('sell_id','N/A')}, Price: ${swap.get('sell_price',0):.1f}M, Score: {sell_score_display}, AvgL3: {sell_avg_raw_display}, LastR: {sell_last_race_raw_display}, TotPts: {sell_total_pts_raw_display}, Trend: {sell_trend_raw_display})"
             )
             print(
-                f"   Swap In:  {swap['buy_name']} (ID: {swap['buy_id']}, Price: ${swap['buy_price']:.1f}M, Score: {buy_score_display}, AvgL3: {buy_avg_raw_display}, LastR: {buy_last_race_raw_display})"
+                f"   Swap In:  {swap.get('buy_name','N/A')} (ID: {swap.get('buy_id','N/A')}, Price: ${swap.get('buy_price',0):.1f}M, Score: {buy_score_display}, AvgL3: {buy_avg_raw_display}, LastR: {buy_last_race_raw_display}, TotPts: {buy_total_pts_raw_display}, Trend: {buy_trend_raw_display})"
             )
             print(f"   Combined Score Improvement: +{improvement_score_display}")
             print(
-                f"   Resulting Team Value: ${swap['new_team_value']:.2f}M / Money Left Under Cap: ${swap['money_left_under_cap']:.2f}M"
+                f"   Resulting Team Value: ${swap.get('new_team_value',0):.2f}M / Money Left Under Cap: ${swap.get('money_left_under_cap',0):.2f}M"
             )
+
     elif suggestion_type_name == "True Double Swaps":
         title_cap_info = (
             f" (Team Budget Cap: ${dynamic_budget:.2f}M)"
@@ -1046,31 +1127,63 @@ def display_suggestions(
             f"\nTop {len(suggestion_list)} True Double Swap Option(s){title_cap_info}:"
         )
 
-        for i, swap in enumerate(suggestion_list):
-            s1 = swap["sell1"]
-            s2 = swap["sell2"]
-            b1 = swap["buy1"]
-            b2 = swap["buy2"]
+        for i, swap_pair in enumerate(suggestion_list):
+            s1 = swap_pair.get(
+                "sell1", {}
+            )  # Use .get with default empty dict for safety
+            s2 = swap_pair.get("sell2", {})
+            b1 = swap_pair.get("buy1", {})
+            b2 = swap_pair.get("buy2", {})
+
+            # Enhanced helper for formatting asset details for double swaps
+            def format_asset_details_for_double_swap(asset_dict):
+                # Inner helper for individual numeric values
+                def format_num(val_key, precision=1, default_str="N/A"):
+                    val = asset_dict.get(val_key)
+                    if isinstance(val, (int, float)) and not np.isnan(val):
+                        return f"{val:.{precision}f}"
+                    return default_str
+
+                name_id = f"{asset_dict.get('Name', 'N/A')} (ID: {asset_dict.get('ID', 'N/A')})"
+                price = f"Price: ${asset_dict.get('Price', 0):.1f}M"
+                score = f"Score: {asset_dict.get('Combined_Score', 0):.2f}"
+
+                avg_l3_raw = format_num(
+                    "Avg_Points_Last_3_Races", 2
+                )  # Using 2 decimal for average
+                last_r_raw = format_num("Points_Last_Race", 1)
+                total_pts_raw = format_num("Total_Points_So_Far", 1)
+                trend_raw = format_num("Trend_Score", 1)
+
+                return (
+                    f"{name_id}, {price}, {score}, "
+                    f"AvgL3: {avg_l3_raw}, LastR: {last_r_raw}, "
+                    f"TotPts: {total_pts_raw}, Trend: {trend_raw}"
+                )
 
             print(f"\n{i+1}. Sell Pair:")
+            print(f"   Out: {format_asset_details_for_double_swap(s1)}")
+            print(f"   Out: {format_asset_details_for_double_swap(s2)}")
             print(
-                f"   Out: {s1['Name']} (ID: {s1['ID']}, Price: ${s1['Price']:.1f}M, Score: {s1['Combined_Score']:.2f})"
+                f"   Combined Sell Price: ${swap_pair.get('sell_pair_price', 0):.1f}M"
             )
-            print(
-                f"   Out: {s2['Name']} (ID: {s2['ID']}, Price: ${s2['Price']:.1f}M, Score: {s2['Combined_Score']:.2f})"
-            )
-            print(f"   Combined Sell Price: ${swap['sell_pair_price']:.1f}M")
             print(f"   Buy Pair:")
-            print(
-                f"   In:  {b1['Name']} (ID: {b1['ID']}, Price: ${b1['Price']:.1f}M, Score: {b1['Combined_Score']:.2f})"
+            print(f"   In:  {format_asset_details_for_double_swap(b1)}")
+            print(f"   In:  {format_asset_details_for_double_swap(b2)}")
+            print(f"   Combined Buy Price: ${swap_pair.get('buy_pair_price', 0):.1f}M")
+
+            improvement_score_val = swap_pair.get("improvement_score", 0)
+            improvement_score_str = (
+                f"{improvement_score_val:.2f}"
+                if isinstance(improvement_score_val, (int, float))
+                else "N/A"
             )
+            print(f"   Combined Score Improvement: +{improvement_score_str}")
+
+            new_team_val_str = f"{swap_pair.get('new_team_value', 0):.2f}"
+            money_left_str = f"{swap_pair.get('money_left_under_cap', 0):.2f}"
             print(
-                f"   In:  {b2['Name']} (ID: {b2['ID']}, Price: ${b2['Price']:.1f}M, Score: {b2['Combined_Score']:.2f})"
-            )
-            print(f"   Combined Buy Price: ${swap['buy_pair_price']:.1f}M")
-            print(f"   Combined Score Improvement: +{swap['improvement_score']:.2f}")
-            print(
-                f"   Resulting Team Value: ${swap['new_team_value']:.2f}M / Money Left Under Cap: ${swap['money_left_under_cap']:.2f}M"
+                f"   Resulting Team Value: ${new_team_val_str}M / Money Left Under Cap: ${money_left_str}M"
             )
 
 
@@ -1212,21 +1325,57 @@ def optimize_wildcard_team(
 
 
 def main():
+    # --- Choose Weight Profile ---
+    print("\n--- Select Weighting Profile for Combined_Score ---")
+    profile_options = list(WEIGHT_PROFILES.keys())
+    for i, profile_name in enumerate(profile_options):
+        print(f"{i+1}. {profile_name.replace('_', ' ').title()}")
+
+    default_profile_name = "balanced"  # Or your preferred default
+    selected_weights = WEIGHT_PROFILES[default_profile_name]  # Default
+
+    try:
+        profile_choice_idx = input(
+            f"Enter choice (1-{len(profile_options)}, default: {default_profile_name.title()}): "
+        )
+        if profile_choice_idx:  # If user pressed Enter, it's empty string
+            profile_choice_idx = int(profile_choice_idx) - 1
+            if 0 <= profile_choice_idx < len(profile_options):
+                selected_profile_name = profile_options[profile_choice_idx]
+                selected_weights = WEIGHT_PROFILES[selected_profile_name]
+                print(
+                    f"Using '{selected_profile_name.replace('_', ' ').title()}' profile."
+                )
+            else:
+                print(
+                    f"Invalid choice. Using default '{default_profile_name.title()}' profile."
+                )
+        else:
+            print(f"No input. Using default '{default_profile_name.title()}' profile.")
+    except ValueError:
+        print(f"Invalid input. Using default '{default_profile_name.title()}' profile.")
+
+    # --- Load Data with selected weights ---
     all_assets_df, my_team_df, warning_msg = load_and_process_data(
-        ASSET_DATA_FILE, MY_TEAM_FILE, MANUAL_ADJUSTMENTS_FILE
+        ASSET_DATA_FILE,
+        MY_TEAM_FILE,
+        MANUAL_ADJUSTMENTS_FILE,
+        selected_weights,  # Pass the chosen weights
     )
 
-    if all_assets_df is None:  # Critical error during data loading
+    if all_assets_df is None:
         print("Exiting due to critical error in data loading.")
         return
 
+    # --- Mode Selection (Weekly Transfers or Wildcard) ---
     print("\nChoose mode:")
     print("1. Weekly Transfer Suggestions")
     print("2. Wildcard Team Optimizer (Build new team from scratch)")
 
-    mode_choice = input("Enter choice (1 or 2): ")
+    mode_choice = input("Enter choice (1 or 2, default: 1): ") or "1"  # Default to 1
 
     if mode_choice == "1":
+        # ... (your existing weekly transfer logic) ...
         if my_team_df is None or my_team_df.empty:
             print(
                 "Cannot proceed with weekly transfers: Team data is missing or empty."
@@ -1234,7 +1383,9 @@ def main():
             return
 
         dynamic_budget, current_team_value = display_team_and_budget_info(
-            my_team_df, INITIAL_BUDGET, warning_msg
+            my_team_df,
+            INITIAL_BUDGET,
+            warning_msg,  # Pass original warning_msg from loading
         )
 
         mandatory_transfers_df = identify_mandatory_transfers(my_team_df)
@@ -1255,12 +1406,9 @@ def main():
             num_mandatory_transfers,
         )
 
-        # Check if any suggestions were made (using .get for safety)
         no_mandatory = not suggested_swaps.get("mandatory")
         no_discretionary_seq = not suggested_swaps.get("discretionary_sequence")
-        no_double_swaps = not suggested_swaps.get(
-            "true_double_swaps"
-        )  # Assuming this key exists
+        no_double_swaps = not suggested_swaps.get("true_double_swaps")
 
         if (
             no_mandatory
@@ -1273,11 +1421,9 @@ def main():
             )
 
     elif mode_choice == "2":
-        optimize_wildcard_team(
-            all_assets_df, INITIAL_BUDGET
-        )  # Using INITIAL_BUDGET for wildcard
+        optimize_wildcard_team(all_assets_df, INITIAL_BUDGET)
     else:
-        print("Invalid choice. Exiting.")
+        print("Invalid mode choice. Exiting.")
 
 
 if __name__ == "__main__":
