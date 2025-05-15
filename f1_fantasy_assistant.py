@@ -11,138 +11,248 @@ MY_TEAM_FILE = "my_team.csv"
 METADATA_COLUMNS = ["ID", "Name", "Type", "Constructor", "Price", "Active"]
 DEFAULT_FREE_TRANSFERS = 2  # Standard free transfers per week, can be adjusted
 
+# Weights for Combined Score (should sum to 1.0 if desired, but not strictly necessary for ranking improvement)
+WEIGHT_RECENT_FORM = 0.6  # For Avg_Points_Last_3_Races
+WEIGHT_PPM = 0.4  # For PPM_Current
 
-def load_and_process_data(asset_file_path, team_file_path):
+
+def load_and_process_data(asset_file, team_file):
     """
-    Loads asset and team data from CSV files, processes it, and calculates
-    initial metrics.
+    Loads asset and team data, preprocesses it, calculates key metrics like
+    Total_Points_So_Far, Avg_Points_Last_3_Races, and Combined_Score.
     """
-    print(f"Loading data from {asset_file_path} and {team_file_path}...")
-
-    # --- 1. Load asset_data.csv ---
+    warning_msg = ""
+    asset_data_df = None  # Initialize to ensure it's defined in all paths
+    my_team_df = None  # Initialize
     try:
-        all_assets_df = pd.read_csv(asset_file_path)
-    except FileNotFoundError:
-        print(
-            f"ERROR: File not found: {asset_file_path}. Please ensure it's in the same directory as the script."
-        )
-        return None, None, ""
+        asset_data_df = pd.read_csv(asset_file)
+        asset_data_df.columns = asset_data_df.columns.str.strip()
 
-    # Validate essential metadata columns
-    missing_cols = [col for col in METADATA_COLUMNS if col not in all_assets_df.columns]
-    if missing_cols:
-        print(
-            f"ERROR: Missing essential columns in {asset_file_path}: {', '.join(missing_cols)}"
-        )
-        return None, None, ""
+        # 1. Ensure essential METADATA columns exist
+        for col in METADATA_COLUMNS:
+            if col not in asset_data_df.columns:
+                raise ValueError(
+                    f"Essential metadata column '{col}' not found in {asset_file}. Required: {METADATA_COLUMNS}"
+                )
 
-    # --- 2. Preprocess asset_data.csv ---
-    # Convert data types
-    all_assets_df["Price"] = pd.to_numeric(all_assets_df["Price"], errors="coerce")
-    all_assets_df["Active"] = all_assets_df["Active"].astype(bool)
+        # 2. Identify GP points columns and ensure they are numeric
+        gp_points_cols = [
+            col for col in asset_data_df.columns if col not in METADATA_COLUMNS
+        ]
+        if not gp_points_cols:
+            warning_msg += "\nWarning: No GP points columns found in asset_data.csv. Points-based metrics will be zero."
+            # Create empty placeholder columns if they are expected later, or handle appropriately
+            asset_data_df["Total_Points_So_Far"] = 0.0
+            asset_data_df["Avg_Points_Last_3_Races"] = 0.0
+        else:
+            for col in gp_points_cols:
+                asset_data_df[col] = pd.to_numeric(
+                    asset_data_df[col], errors="coerce"
+                ).fillna(0)
 
-    # Identify GP points columns (any column not in METADATA_COLUMNS)
-    gp_points_columns = [
-        col for col in all_assets_df.columns if col not in METADATA_COLUMNS
-    ]
-
-    # Convert GP points columns to numeric, coercing errors to NaN (for blanks)
-    for col in gp_points_columns:
-        all_assets_df[col] = pd.to_numeric(all_assets_df[col], errors="coerce")
-
-    # --- 3. Calculate points-based metrics for all_assets_df ---
-    all_assets_df["Total_Points_So_Far"] = all_assets_df[gp_points_columns].sum(
-        axis=1, skipna=True
-    )
-
-    # Calculate Points_Last_Race and Avg_Points_Last_3_Races
-    # This needs to find the *last non-NaN* columns for each row more dynamically
-
-    valid_gp_cols_by_asset = []
-    for index, row in all_assets_df.iterrows():
-        asset_gp_cols = [col for col in gp_points_columns if pd.notna(row[col])]
-        valid_gp_cols_by_asset.append(asset_gp_cols)
-
-    all_assets_df["Points_Last_Race"] = [
-        all_assets_df.loc[i, cols[-1]] if cols else 0
-        for i, cols in enumerate(valid_gp_cols_by_asset)
-    ]
-
-    avg_last_3 = []
-    for i, cols in enumerate(valid_gp_cols_by_asset):
-        if len(cols) >= 3:
-            avg_last_3.append(all_assets_df.loc[i, cols[-3:]].mean())
-        elif cols:  # 1 or 2 races
-            avg_last_3.append(all_assets_df.loc[i, cols].mean())
-        else:  # 0 races
-            avg_last_3.append(0)
-    all_assets_df["Avg_Points_Last_3_Races"] = avg_last_3
-
-    all_assets_df["PPM_Current"] = (
-        (all_assets_df["Total_Points_So_Far"] / all_assets_df["Price"])
-        .replace([np.inf, -np.inf], 0)
-        .fillna(0)
-    )
-
-    # --- 4. Load my_team.csv ---
-    try:
-        my_team_ids_df = pd.read_csv(team_file_path)
-    except FileNotFoundError:
-        print(
-            f"ERROR: File not found: {team_file_path}. Please ensure it's in the same directory as the script."
-        )
-        return None, None, ""
-
-    if "ID" not in my_team_ids_df.columns:
-        print(f"ERROR: 'ID' column missing in {team_file_path}.")
-        return None, None, ""
-
-    # --- 5. Merge team data with asset data ---
-    # We use the IDs from my_team_ids_df to select rows from all_assets_df
-    # The 'Price' column in my_team.csv is the current price, which we'll effectively ignore
-    # in favor of the 'Price' from all_assets_df for consistency.
-    my_team_details_df = all_assets_df[
-        all_assets_df["ID"].isin(my_team_ids_df["ID"])
-    ].copy()
-
-    if len(my_team_details_df) != len(my_team_ids_df):
-        print(
-            "WARNING: Some IDs in my_team.csv were not found in asset_data.csv. Check your IDs."
-        )
-        # Find missing IDs
-        missing_ids_in_assets = set(my_team_ids_df["ID"]) - set(all_assets_df["ID"])
-        if missing_ids_in_assets:
-            print(
-                f"IDs in {team_file_path} but not in {asset_file_path}: {missing_ids_in_assets}"
+            # 3. Calculate Total_Points_So_Far
+            asset_data_df["Total_Points_So_Far"] = asset_data_df[gp_points_cols].sum(
+                axis=1
             )
 
-    # --- 6. Handle Purchase_Price for the current team ---
-    # As actual purchase prices are not available, assume Purchase_Price = Current_Price
-    # The 'Price' column in all_assets_df is Current_Price
-    my_team_details_df["Purchase_Price"] = my_team_details_df["Price"]
+            # 4. Calculate Avg_Points_Last_3_Races
+            num_races_to_average = min(len(gp_points_cols), 3)
+            if num_races_to_average > 0:
+                last_n_gp_cols = gp_points_cols[-num_races_to_average:]
+                asset_data_df["Avg_Points_Last_3_Races"] = (
+                    asset_data_df[last_n_gp_cols].mean(axis=1, skipna=True).fillna(0)
+                )
+            else:
+                asset_data_df["Avg_Points_Last_3_Races"] = 0.0
 
-    purchase_price_warning = (
-        "IMPORTANT:\n"
-        "Historical purchase prices for your current team members were not available.\n"
-        "Therefore, their 'Purchase_Price' has been defaulted to their 'Current_Price'.\n"
-        "This means your initial dynamic budget will equal the standard INITIAL_BUDGET.\n"
-        "The tool will track budget changes accurately based on future price fluctuations.\n"
-        "For future transfers, try to record the actual purchase price in your my_team.csv \n"
-        "(e.g., by changing its columns to 'ID' and 'Purchase_Price') for more accurate historical budget tracking.\n"
-    )
+        # Price parsing (ensure this happens *after* potential GP columns are identified and excluded)
+        if "Price" in asset_data_df.columns:
+            if asset_data_df["Price"].dtype == "object":
+                asset_data_df["Price"] = (
+                    asset_data_df["Price"]
+                    .replace({r"\$": "", "M": ""}, regex=True)
+                    .astype(float)
+                )
+            else:  # If it's already numeric (e.g. from a clean CSV)
+                asset_data_df["Price"] = pd.to_numeric(
+                    asset_data_df["Price"], errors="coerce"
+                ).fillna(0)
 
-    # Calculate PPM on purchase price for owned assets
-    my_team_details_df["PPM_on_Purchase"] = (
-        (
-            my_team_details_df["Total_Points_So_Far"]
-            / my_team_details_df["Purchase_Price"]
+        asset_data_df["Active"] = asset_data_df["Active"].astype(bool)
+
+        # Calculate PPM_Current
+        asset_data_df["PPM_Current"] = 0.0
+        non_zero_price_mask = asset_data_df["Price"] != 0
+        asset_data_df.loc[non_zero_price_mask, "PPM_Current"] = (
+            asset_data_df.loc[non_zero_price_mask, "Total_Points_So_Far"]
+            / asset_data_df.loc[non_zero_price_mask, "Price"]
         )
-        .replace([np.inf, -np.inf], 0)
-        .fillna(0)
-    )
+        asset_data_df["PPM_Current"] = (
+            asset_data_df["PPM_Current"].replace([np.inf, -np.inf], 0).fillna(0)
+        )
 
-    print("Data loaded and processed successfully.")
-    return all_assets_df, my_team_details_df, purchase_price_warning
+        # Calculate Combined Score
+        asset_data_df["Combined_Score"] = 0.0
+        asset_data_df["Norm_Avg_Points_Last_3"] = 0.5
+        asset_data_df["Norm_PPM"] = 0.5
+
+        for asset_type in ["Driver", "Constructor"]:
+            type_mask = asset_data_df["Type"] == asset_type
+            if type_mask.sum() > 0:
+                avg_points_series = asset_data_df.loc[
+                    type_mask, "Avg_Points_Last_3_Races"
+                ].fillna(0)
+                norm_avg_points_for_type = normalize_series(avg_points_series)
+
+                ppm_series = asset_data_df.loc[type_mask, "PPM_Current"].fillna(0)
+                norm_ppm_for_type = normalize_series(ppm_series)
+
+                asset_data_df.loc[type_mask, "Norm_Avg_Points_Last_3"] = (
+                    norm_avg_points_for_type
+                )
+                asset_data_df.loc[type_mask, "Norm_PPM"] = norm_ppm_for_type
+
+                asset_data_df.loc[
+                    type_mask, "Combined_Score"
+                ] = WEIGHT_RECENT_FORM * asset_data_df.loc[
+                    type_mask, "Norm_Avg_Points_Last_3"
+                ].fillna(
+                    0.5
+                ) + WEIGHT_PPM * asset_data_df.loc[
+                    type_mask, "Norm_PPM"
+                ].fillna(
+                    0.5
+                )
+        asset_data_df["Combined_Score"] = asset_data_df["Combined_Score"].fillna(0)
+
+    except FileNotFoundError:
+        warning_msg = f"Error: The file {asset_file} was not found."
+        print(warning_msg)
+        return None, None, warning_msg  # Return None for dfs
+    except ValueError as e:
+        warning_msg = f"Error processing data in {asset_file}: {e}"
+        print(warning_msg)
+        return None, None, warning_msg  # Return None for dfs
+    except Exception as e:
+        warning_msg = (
+            f"An unexpected error occurred during data loading from {asset_file}: {e}"
+        )
+        print(warning_msg)
+        return None, None, warning_msg  # Return None for dfs
+
+    # --- Load and process My Team data ---
+    if team_file:
+        try:
+            my_team_df_raw = pd.read_csv(team_file)
+            my_team_df_raw.columns = my_team_df_raw.columns.str.strip()
+
+            if "Purchase_Price" not in my_team_df_raw.columns:
+                my_team_df_raw["Purchase_Price"] = 0.0
+                warning_msg += "\nWarning: 'Purchase_Price' not found in {MY_TEAM_FILE}, defaulted to 0."
+            else:
+                if my_team_df_raw["Purchase_Price"].dtype == "object":
+                    my_team_df_raw["Purchase_Price"] = (
+                        my_team_df_raw["Purchase_Price"]
+                        .replace({r"\$": "", "M": ""}, regex=True)
+                        .astype(float)
+                    )
+                else:
+                    my_team_df_raw["Purchase_Price"] = pd.to_numeric(
+                        my_team_df_raw["Purchase_Price"], errors="coerce"
+                    ).fillna(0)
+
+            # Define columns to bring in from asset_data_df
+            # Ensure these columns exist in asset_data_df (which they should, after calculation or being metadata)
+            cols_to_merge = [
+                "ID",
+                "Name",
+                "Type",
+                "Constructor",
+                "Price",
+                "Active",
+                "Total_Points_So_Far",
+                "Avg_Points_Last_3_Races",
+                "PPM_Current",
+                "Combined_Score",
+                "Norm_Avg_Points_Last_3",
+                "Norm_PPM",
+            ]
+
+            # Filter to ensure only existing columns in asset_data_df are used for merge
+            # This is important if asset_data_df processing failed partially but didn't return None
+            if asset_data_df is not None:
+                actual_cols_to_merge = [
+                    col for col in cols_to_merge if col in asset_data_df.columns
+                ]
+                my_team_df = pd.merge(
+                    my_team_df_raw[["ID", "Purchase_Price"]],
+                    asset_data_df[actual_cols_to_merge],
+                    on="ID",
+                    how="left",
+                )
+            else:  # asset_data_df itself is None
+                my_team_df = None  # Cannot merge
+                warning_msg += (
+                    "\nError: Asset data is not available, cannot process team data."
+                )
+
+            if my_team_df is not None and not my_team_df.empty:
+                my_team_df["PPM_on_Purchase"] = 0.0
+                # Check if 'Total_Points_So_Far' and 'Purchase_Price' are available for PPM calculation
+                if (
+                    "Total_Points_So_Far" in my_team_df.columns
+                    and "Purchase_Price" in my_team_df.columns
+                ):
+                    non_zero_purchase_price_mask = my_team_df["Purchase_Price"] != 0
+                    my_team_df.loc[non_zero_purchase_price_mask, "PPM_on_Purchase"] = (
+                        my_team_df.loc[
+                            non_zero_purchase_price_mask, "Total_Points_So_Far"
+                        ]
+                        / my_team_df.loc[non_zero_purchase_price_mask, "Purchase_Price"]
+                    )
+                my_team_df["PPM_on_Purchase"] = (
+                    my_team_df["PPM_on_Purchase"]
+                    .replace([np.inf, -np.inf], 0)
+                    .fillna(0)
+                )
+
+                # Check for missing data in my_team_df after merge
+                if my_team_df.isnull().values.any():  # More direct check for any NaN
+                    warning_msg += "\nWarning: Some assets in your team file may not have been found in the asset data or have missing details after merge."
+                    num_cols_to_fill = [
+                        "Price",
+                        "Total_Points_So_Far",
+                        "Avg_Points_Last_3_Races",
+                        "PPM_Current",
+                        "Combined_Score",
+                        "Norm_Avg_Points_Last_3",
+                        "Norm_PPM",
+                    ]
+                    for col in num_cols_to_fill:
+                        if col in my_team_df.columns:
+                            my_team_df[col] = my_team_df[col].fillna(0)
+                    if "Active" in my_team_df.columns:
+                        my_team_df["Active"] = my_team_df["Active"].fillna(
+                            False
+                        )  # Default to False if missing
+            elif (
+                my_team_df is not None and my_team_df.empty
+            ):  # Merged but result is empty
+                warning_msg += f"\nWarning: Team data is empty after merge. Check IDs in {MY_TEAM_FILE} against {ASSET_DATA_FILE}."
+
+        except FileNotFoundError:
+            warning_msg += f"\nError: Your team file {team_file} was not found."
+            # my_team_df remains None
+        except Exception as e:
+            warning_msg += f"\nAn unexpected error occurred loading team data from {team_file}: {e}"
+            my_team_df = None
+
+    if warning_msg:
+        print(
+            f"\n--- Data Loading Log ---\n{warning_msg.strip()}\n------------------------"
+        )
+
+    return asset_data_df, my_team_df, warning_msg
 
 
 def display_team_and_budget_info(team_df, initial_budget, budget_warning_message):
@@ -284,104 +394,98 @@ def suggest_swaps(
 
     if num_discretionary_transfers_available > 0:
         print(
-            f"\n--- Sequential Suggestions for up to {num_discretionary_transfers_available} Discretionary Single Swap(s) ---"
+            f"\n--- Sequential Suggestions for up to {num_discretionary_transfers_available} Discretionary Single Swap(s) (Using Combined Score) ---"
         )
 
-        # Start with the actual current team state for the sequence
         hypothetical_team_df = my_team_df.copy()
         hypothetical_current_team_value = current_team_value
-        # Ensure all_assets_df has 'Purchase_Price' and 'PPM_on_Purchase' if needed for hypothetical_team_df consistency
-        # Typically, these are calculated when a team is formed or an asset is bought.
-        # For this simulation, if adding from all_assets_df, we might need to compute them.
-        # However, PPM_on_Purchase for a *newly bought hypothetical asset* isn't relevant for its *selection criteria*.
-        # We need 'Price', 'Type', 'Avg_Points_Last_3_Races', 'ID', 'Name'.
-        # Let's ensure columns for hypothetical_team_df align with my_team_df.
-
         final_discretionary_sequence = []
 
         for transfer_num in range(num_discretionary_transfers_available):
             current_budget_headroom = dynamic_budget - hypothetical_current_team_value
 
-            # Ensure hypothetical_team_df has an 'Active' column, if not already present from my_team_df copy
-            if (
-                "Active" not in hypothetical_team_df.columns
-            ):  # Should be there from my_team_df
+            if "Active" not in hypothetical_team_df.columns:
                 hypothetical_team_df = hypothetical_team_df.merge(
                     all_assets_df[["ID", "Active"]], on="ID", how="left"
                 )
-
             active_team_members_to_sell = hypothetical_team_df[
                 hypothetical_team_df["Active"]
             ].copy()
 
             best_swap_this_iteration = None
-            highest_improvement_score_this_iteration = -float(
-                "inf"
-            )  # Start very low to capture any positive
+            # Improvement score can be negative if we are forced to sell a high scorer
+            # but for discretionary, we only want positive improvements.
+            highest_improvement_score_this_iteration = (
+                0  # Only consider positive improvements
+            )
 
-            # Find the single best swap from the current hypothetical state
             for _, asset_to_sell_row in active_team_members_to_sell.iterrows():
                 sell_id = asset_to_sell_row["ID"]
                 sell_name = asset_to_sell_row["Name"]
                 sell_price = asset_to_sell_row["Price"]
                 sell_type = asset_to_sell_row["Type"]
-                sell_avg_points = asset_to_sell_row["Avg_Points_Last_3_Races"]
+                # Use Combined_Score of the asset to sell
+                sell_combined_score = asset_to_sell_row["Combined_Score"]
 
                 max_buy_price = sell_price + current_budget_headroom
-
-                # Available for purchase: active, not on *hypothetical* team
                 hypothetical_owned_ids = list(hypothetical_team_df["ID"])
-                current_available_for_purchase_df = all_assets_df[
-                    (all_assets_df["Active"])
-                    & (~all_assets_df["ID"].isin(hypothetical_owned_ids))
-                ].copy()
+                current_available_for_purchase_df = (
+                    all_assets_df[  # all_assets_df now has Combined_Score
+                        (all_assets_df["Active"])
+                        & (~all_assets_df["ID"].isin(hypothetical_owned_ids))
+                    ].copy()
+                )
 
                 potential_buys = current_available_for_purchase_df[
                     (current_available_for_purchase_df["Type"] == sell_type)
                     & (current_available_for_purchase_df["Price"] <= max_buy_price)
-                    & (
-                        current_available_for_purchase_df["ID"] != sell_id
-                    )  # Should be redundant due to isin(hypothetical_owned_ids)
-                ].copy()
+                ].copy()  # Removed ID != sell_id as isin(hypothetical_owned_ids) covers it
 
                 if not potential_buys.empty:
-                    potential_buys["Improvement_Score_Avg3"] = (
-                        potential_buys["Avg_Points_Last_3_Races"] - sell_avg_points
+                    # Calculate improvement based on Combined_Score
+                    potential_buys["Improvement_Score_Combined"] = (
+                        potential_buys["Combined_Score"] - sell_combined_score
                     )
-                    # Filter for actual improvements
+
                     improved_options = potential_buys[
-                        potential_buys["Improvement_Score_Avg3"] > 0
-                    ].sort_values(by="Improvement_Score_Avg3", ascending=False)
+                        potential_buys["Improvement_Score_Combined"] > 0
+                    ].sort_values(by="Improvement_Score_Combined", ascending=False)
 
                     if not improved_options.empty:
                         current_best_buy_for_this_sell = improved_options.iloc[0]
                         if (
-                            current_best_buy_for_this_sell["Improvement_Score_Avg3"]
+                            current_best_buy_for_this_sell["Improvement_Score_Combined"]
                             > highest_improvement_score_this_iteration
                         ):
                             highest_improvement_score_this_iteration = (
-                                current_best_buy_for_this_sell["Improvement_Score_Avg3"]
+                                current_best_buy_for_this_sell[
+                                    "Improvement_Score_Combined"
+                                ]
                             )
+                            # Store relevant details for the suggestion
                             best_swap_this_iteration = {
                                 "sell_id": sell_id,
                                 "sell_name": sell_name,
                                 "sell_price": sell_price,
                                 "sell_type": sell_type,
-                                "sell_avg_points": sell_avg_points,
+                                "sell_score": sell_combined_score,  # Storing score
                                 "buy_id": current_best_buy_for_this_sell["ID"],
                                 "buy_name": current_best_buy_for_this_sell["Name"],
                                 "buy_price": current_best_buy_for_this_sell["Price"],
-                                "buy_avg_points": current_best_buy_for_this_sell[
-                                    "Avg_Points_Last_3_Races"
-                                ],
-                                "improvement_score": highest_improvement_score_this_iteration,
+                                "buy_score": current_best_buy_for_this_sell[
+                                    "Combined_Score"
+                                ],  # Storing score
+                                "improvement_score": highest_improvement_score_this_iteration,  # This is Combined Improvement
                             }
 
             if best_swap_this_iteration:
-                # Record this swap in the sequence
+                # ... (rest of the logic for updating hypothetical state and appending to final_discretionary_sequence)
+                # This part remains largely the same, just ensure the dict keys match what display_suggestions expects
+                # e.g. 'sell_avg_points' might become 'sell_score', 'buy_avg_points' to 'buy_score'
+                # For now, I will keep the existing structure and add new score fields to the dict for display.
+
                 swap_sell_price = best_swap_this_iteration["sell_price"]
                 swap_buy_price = best_swap_this_iteration["buy_price"]
-
                 new_team_val_after_this_one_swap = (
                     hypothetical_current_team_value - swap_sell_price + swap_buy_price
                 )
@@ -391,27 +495,32 @@ def suggest_swaps(
                 best_swap_this_iteration["money_left_under_cap"] = (
                     dynamic_budget - new_team_val_after_this_one_swap
                 )
+
+                # Add original point metrics for display comparison if desired
+                original_sell_asset = my_team_df[
+                    my_team_df["ID"] == best_swap_this_iteration["sell_id"]
+                ].iloc[0]
+                original_buy_asset = all_assets_df[
+                    all_assets_df["ID"] == best_swap_this_iteration["buy_id"]
+                ].iloc[0]
+                best_swap_this_iteration["sell_avg_points_raw"] = original_sell_asset[
+                    "Avg_Points_Last_3_Races"
+                ]
+                best_swap_this_iteration["buy_avg_points_raw"] = original_buy_asset[
+                    "Avg_Points_Last_3_Races"
+                ]
+
                 final_discretionary_sequence.append(best_swap_this_iteration)
 
                 # ---- Update hypothetical state for the next iteration ----
-                # 1. Update team value
                 hypothetical_current_team_value = new_team_val_after_this_one_swap
-
-                # 2. Update team DataFrame: remove sold player, add bought player
-                # Remove sold player
                 hypothetical_team_df = hypothetical_team_df[
                     hypothetical_team_df["ID"] != best_swap_this_iteration["sell_id"]
                 ].copy()
-
-                # Get full details of bought player from all_assets_df
-                # We need to ensure the structure matches my_team_df for concat, especially 'Purchase_Price' and 'PPM_on_Purchase'
                 asset_to_add_details = all_assets_df[
                     all_assets_df["ID"] == best_swap_this_iteration["buy_id"]
                 ].copy()
-
-                # For hypothetical addition, set Purchase_Price = Current Price
                 asset_to_add_details["Purchase_Price"] = asset_to_add_details["Price"]
-                # Calculate PPM_on_Purchase for the new asset
                 asset_to_add_details["PPM_on_Purchase"] = (
                     (
                         asset_to_add_details["Total_Points_So_Far"]
@@ -420,22 +529,10 @@ def suggest_swaps(
                     .replace([np.inf, -np.inf], 0)
                     .fillna(0)
                 )
-
-                # Select columns that match my_team_df (which hypothetical_team_df is a copy of)
-                # This assumes my_team_df has all necessary columns also present in the processed all_assets_df
-                # plus Purchase_Price and PPM_on_Purchase.
-                cols_for_hypothetical_team = list(
-                    my_team_df.columns
-                )  # Get target columns from original my_team_df structure
-
-                # Ensure asset_to_add_details has all these columns before concat
+                cols_for_hypothetical_team = list(my_team_df.columns)
                 for col in cols_for_hypothetical_team:
                     if col not in asset_to_add_details.columns:
-                        # This might happen if a calculated field in my_team_df isn't directly in all_assets_df
-                        # For now, we assume essential ones are there or calculated.
-                        # For safety, assign NaN or a default if a column is missing.
                         asset_to_add_details[col] = np.nan
-
                 hypothetical_team_df = pd.concat(
                     [
                         hypothetical_team_df,
@@ -443,19 +540,16 @@ def suggest_swaps(
                     ],
                     ignore_index=True,
                 )
+
             else:
-                # No beneficial swap found in this iteration, so break the sequence
-                if (
-                    transfer_num == 0
-                ):  # If even the first discretionary swap isn't found
+                if transfer_num == 0:
                     print(
-                        "No beneficial discretionary single swaps found based on Avg_Points_Last_3_Races and current budget."
+                        "No beneficial discretionary single swaps found based on Combined Score and current budget."
                     )
                 break
 
         if final_discretionary_sequence:
             suggestions["discretionary_sequence"] = final_discretionary_sequence
-            # Display this sequence. You might want to adjust the title in display_suggestions for clarity.
             display_suggestions(
                 suggestions["discretionary_sequence"],
                 "Discretionary Single Swaps",
@@ -505,31 +599,70 @@ def display_suggestions(
                 )
 
     elif suggestion_type_name == "Discretionary Single Swaps":
-        # Title is now more dynamic based on whether dynamic_budget is available for display
         title_cap_info = (
             f" (Team Budget Cap: ${dynamic_budget:.2f}M)"
             if dynamic_budget is not None
             else ""
         )
         print(
-            f"\nTop {len(suggestion_list)} Discretionary Single Swap Option(s){title_cap_info}:"
+            f"\nTop {len(suggestion_list)} Discretionary Single Swap Option(s) (Using Combined Score){title_cap_info}:"
         )
 
         for i, swap in enumerate(suggestion_list):
+            # Accessing the stored scores, and raw points for context
+            sell_score_display = (
+                f"{swap.get('sell_score', 'N/A'):.2f}"
+                if isinstance(swap.get("sell_score"), (int, float))
+                else "N/A"
+            )
+            buy_score_display = (
+                f"{swap.get('buy_score', 'N/A'):.2f}"
+                if isinstance(swap.get("buy_score"), (int, float))
+                else "N/A"
+            )
+            improvement_score_display = (
+                f"{swap.get('improvement_score', 'N/A'):.2f}"
+                if isinstance(swap.get("improvement_score"), (int, float))
+                else "N/A"
+            )
+
+            sell_avg_raw_display = (
+                f"{swap.get('sell_avg_points_raw', 'N/A'):.2f}"
+                if isinstance(swap.get("sell_avg_points_raw"), (int, float))
+                else "N/A"
+            )
+            buy_avg_raw_display = (
+                f"{swap.get('buy_avg_points_raw', 'N/A'):.2f}"
+                if isinstance(swap.get("buy_avg_points_raw"), (int, float))
+                else "N/A"
+            )
+
             print(
-                f"\n{i+1}. Swap Out: {swap['sell_name']} (ID: {swap['sell_id']}, Price: ${swap['sell_price']:.1f}M, AvgL3: {swap['sell_avg_points']:.2f})"
+                f"\n{i+1}. Swap Out: {swap['sell_name']} (ID: {swap['sell_id']}, Price: ${swap['sell_price']:.1f}M, Score: {sell_score_display}, AvgL3Raw: {sell_avg_raw_display})"
             )
             print(
-                f"   Swap In:  {swap['buy_name']} (ID: {swap['buy_id']}, Price: ${swap['buy_price']:.1f}M, AvgL3: {swap['buy_avg_points']:.2f})"
+                f"   Swap In:  {swap['buy_name']} (ID: {swap['buy_id']}, Price: ${swap['buy_price']:.1f}M, Score: {buy_score_display}, AvgL3Raw: {buy_avg_raw_display})"
             )
-            print(f"   AvgL3 Points Improvement: +{swap['improvement_score']:.2f}")
-            # Displaying the new team value and how much is left under the cap
+            print(f"   Combined Score Improvement: +{improvement_score_display}")
             print(
                 f"   Resulting Team Value: ${swap['new_team_value']:.2f}M / Money Left Under Cap: ${swap['money_left_under_cap']:.2f}M"
             )
 
 
-def main():  # Assuming you have this structure
+def normalize_series(series):
+    """Normalizes a pandas Series to a 0-1 scale."""
+    min_val = series.min()
+    max_val = series.max()
+    if pd.isna(min_val) or pd.isna(max_val) or max_val == min_val:
+        # Return a series of 0.5 if min/max are NaN (empty series) or all values are the same
+        return pd.Series([0.5] * len(series), index=series.index)
+    return (series - min_val) / (max_val - min_val)
+
+
+def main():
+    """
+    Main function to load data, process it, and suggest swaps.
+    """
     all_assets_df, my_team_df, warning_msg = load_and_process_data(
         ASSET_DATA_FILE, MY_TEAM_FILE
     )
@@ -563,8 +696,8 @@ def main():  # Assuming you have this structure
         )
 
         if (
-            not suggested_swaps["mandatory"]
-            and not suggested_swaps["discretionary"]
+            not suggested_swaps.get("mandatory")
+            and not suggested_swaps.get("discretionary_sequence")
             and num_mandatory_transfers == 0
         ):
             print(
