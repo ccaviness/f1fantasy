@@ -1,5 +1,23 @@
 #!/usr/bin/env python3
-# This script is a Python module for managing and analyzing F1 Fantasy teams.
+# -*- coding: utf-8 -*-
+"""
+This script is a Python module for managing and analyzing F1 Fantasy teams.
+
+It provides functionalities for:
+- Loading and processing asset data (drivers and constructors) from a CSV file.
+- Calculating performance metrics such as total points, recent form, and points per million (PPM).
+- Applying manual adjustments to asset values.
+- Suggesting optimal team compositions based on various weighting profiles and budget constraints.
+- Optimizing team transfers, including mandatory replacements and discretionary swaps.
+- Simulating "Wildcard" and "Limitless" chip scenarios for team optimization.
+- Displaying team information, asset statistics, and transfer suggestions in a user-friendly format.
+
+The script relies on external libraries such as pandas for data manipulation,
+numpy for numerical operations, and pulp for linear programming optimization.
+
+Configuration parameters such as initial budget, data URLs, and weighting profiles
+are defined at the beginning of the script and can be adjusted to customize the analysis.
+"""
 
 import itertools
 import pulp
@@ -214,14 +232,13 @@ def _apply_manual_adjustments(df, adjustments_url):
     return df, warnings
 
 
-def _calculate_derived_scores(df, selected_weights):  # Added selected_weights parameter
-    """Calculates PPM_Current and an enhanced Combined_Score using provided weights."""
-    warnings = ""
-
-    # Calculate PPM_Current (assuming 'Price' and 'Total_Points_So_Far' exist and are numeric)
-    # ... (PPM_Current calculation logic remains the same as your current version) ...
+def _calculate_ppm(df):
+    """Calculates Points Per Million (PPM)."""
     df["PPM_Current"] = 0.0
-    if "Price" in df.columns and "Total_Points_So_Far" in df.columns:
+    price_present = "Price" in df.columns
+    total_points_present = "Total_Points_So_Far" in df.columns
+
+    if price_present and total_points_present:
         non_zero_price_mask = (df["Price"].notna()) & (df["Price"] != 0)
         df.loc[non_zero_price_mask, "PPM_Current"] = (
             df.loc[non_zero_price_mask, "Total_Points_So_Far"]
@@ -229,90 +246,105 @@ def _calculate_derived_scores(df, selected_weights):  # Added selected_weights p
         )
         df["PPM_Current"] = df["PPM_Current"].replace([np.inf, -np.inf], 0).fillna(0)
     else:
-        warnings += "\nWarning: 'Price' or 'Total_Points_So_Far' missing for PPM_Current. PPM_Current set to 0."
+        missing_cols = []
+        if not price_present:
+            missing_cols.append("Price")
+        if not total_points_present:
+            missing_cols.append("Total_Points_So_Far")
+        print(
+            f"Warning: Missing columns {missing_cols} for PPM_Current calculation. Setting PPM_Current to 0."
+        )
+    return df
 
-    # Calculate Trend_Score
-    if (
-        "Points_Last_Race" in df.columns
-        and "User_Adjusted_Avg_Points_Last_3_Races" in df.columns
-    ):
+
+def _calculate_trend_score(df):
+    """Calculates the Trend Score."""
+    df["Trend_Score"] = 0.0
+    last_race_present = "Points_Last_Race" in df.columns
+    adjusted_avg_present = "User_Adjusted_Avg_Points_Last_3_Races" in df.columns
+
+    if last_race_present and adjusted_avg_present:
         df["Trend_Score"] = (
             df["Points_Last_Race"] - df["User_Adjusted_Avg_Points_Last_3_Races"]
         )
     else:
-        warnings += "\nWarning: Columns for Trend_Score calculation missing. Trend_Score set to 0."
-        df["Trend_Score"] = 0.0
+        missing_cols = []
+        if not last_race_present:
+            missing_cols.append("Points_Last_Race")
+        if not adjusted_avg_present:
+            missing_cols.append("User_Adjusted_Avg_Points_Last_3_Races")
+        print(
+            f"Warning: Missing columns {missing_cols} for Trend_Score calculation. Setting Trend_Score to 0."
+        )
     df["Trend_Score"] = df["Trend_Score"].fillna(0)
+    return df
+
+
+def _normalize_series(series):
+    """Normalizes a pandas Series to a 0-1 scale, handling edge cases."""
+    min_val = series.min()
+    max_val = series.max()
+
+    if pd.isna(min_val) or pd.isna(max_val):
+        print("Warning: Series contains NaN values. Returning series filled with 0.5.")
+        return pd.Series([0.5] * len(series), index=series.index)
+
+    if max_val == min_val:
+        print(
+            "Warning: Series has the same min and max value. Returning series filled with 0.5."
+        )
+        return pd.Series([0.5] * len(series), index=series.index)
+
+    return (series - min_val) / (max_val - min_val)
+
+
+def _calculate_combined_score(df, selected_weights):
+    """Calculates the combined score based on normalized components and weights."""
+    # Define the columns to be normalized
+    columns_to_normalize = {
+        "User_Adjusted_Avg_Points_Last_3_Races": "Norm_User_Adjusted_Avg_Points_Last_3",
+        "Points_Last_Race": "Norm_Points_Last_Race",
+        "PPM_Current": "Norm_PPM",
+        "Total_Points_So_Far": "Norm_Total_Points_So_Far",
+        "Trend_Score": "Norm_Trend_Score",
+    }
 
     # Initialize score columns
-    df["Combined_Score"] = 0.0
-    df["Norm_User_Adjusted_Avg_Points_Last_3"] = 0.5
-    df["Norm_Points_Last_Race"] = 0.5
-    df["Norm_PPM"] = 0.5
-    df["Norm_Total_Points_So_Far"] = 0.5
-    df["Norm_Trend_Score"] = 0.5
+    for norm_col in columns_to_normalize.values():
+        df[norm_col] = 0.5  # Default value
 
     for asset_type in ["Driver", "Constructor"]:
         type_mask = df["Type"] == asset_type
         if type_mask.sum() > 0:
-            # Ensure source columns are filled before normalization
-            df.loc[type_mask, "User_Adjusted_Avg_Points_Last_3_Races"] = df.loc[
-                type_mask, "User_Adjusted_Avg_Points_Last_3_Races"
-            ].fillna(0)
-            df.loc[type_mask, "Points_Last_Race"] = df.loc[
-                type_mask, "Points_Last_Race"
-            ].fillna(0)
-            df.loc[type_mask, "PPM_Current"] = df.loc[type_mask, "PPM_Current"].fillna(
-                0
-            )
-            df.loc[type_mask, "Total_Points_So_Far"] = df.loc[
-                type_mask, "Total_Points_So_Far"
-            ].fillna(0)
-            df.loc[type_mask, "Trend_Score"] = df.loc[type_mask, "Trend_Score"].fillna(
-                0
-            )
-
-            df.loc[type_mask, "Norm_User_Adjusted_Avg_Points_Last_3"] = (
-                normalize_series(
-                    df.loc[type_mask, "User_Adjusted_Avg_Points_Last_3_Races"]
+            # Normalize each column and assign to the corresponding Norm column
+            for source_col, norm_col in columns_to_normalize.items():
+                # Ensure source columns are filled before normalization
+                df.loc[type_mask, source_col] = df.loc[type_mask, source_col].fillna(0)
+                df.loc[type_mask, norm_col] = _normalize_series(
+                    df.loc[type_mask, source_col]
                 )
-            )
-            df.loc[type_mask, "Norm_Points_Last_Race"] = normalize_series(
-                df.loc[type_mask, "Points_Last_Race"]
-            )
-            df.loc[type_mask, "Norm_PPM"] = normalize_series(
-                df.loc[type_mask, "PPM_Current"]
-            )
-            df.loc[type_mask, "Norm_Total_Points_So_Far"] = normalize_series(
-                df.loc[type_mask, "Total_Points_So_Far"]
-            )
-            df.loc[type_mask, "Norm_Trend_Score"] = normalize_series(
-                df.loc[type_mask, "Trend_Score"]
-            )
 
-            norm_avg3 = df.loc[
-                type_mask, "Norm_User_Adjusted_Avg_Points_Last_3"
-            ].fillna(0.5)
-            norm_last_race = df.loc[type_mask, "Norm_Points_Last_Race"].fillna(0.5)
-            norm_ppm = df.loc[type_mask, "Norm_PPM"].fillna(0.5)
-            norm_total = df.loc[type_mask, "Norm_Total_Points_So_Far"].fillna(0.5)
-            norm_trend = df.loc[type_mask, "Norm_Trend_Score"].fillna(0.5)
-
-            # Use weights from the selected_weights dictionary
-            df.loc[type_mask, "Combined_Score"] = (
-                selected_weights[KEY_RECENT_FORM] * norm_avg3
-                + selected_weights[KEY_LAST_RACE] * norm_last_race
-                + selected_weights[KEY_PPM] * norm_ppm
-                + selected_weights[KEY_TOTAL_POINTS] * norm_total
-                + selected_weights[KEY_TREND] * norm_trend
-            )
+    # Calculate the combined score using the normalized columns and weights
+    df["Combined_Score"] = (
+        selected_weights["recent_form"] * df["Norm_User_Adjusted_Avg_Points_Last_3"]
+        + selected_weights["last_race"] * df["Norm_Points_Last_Race"]
+        + selected_weights["ppm"] * df["Norm_PPM"]
+        + selected_weights["total_points"] * df["Norm_Total_Points_So_Far"]
+        + selected_weights["trend"] * df["Norm_Trend_Score"]
+    )
 
     df["Combined_Score"] = df["Combined_Score"].fillna(0)
-    if warnings:
-        # This print might be too verbose here, consider returning warnings
-        # print(f"Warnings from _calculate_derived_scores: {warnings}")
-        pass
-    return df, warnings
+    return df
+
+
+def _calculate_derived_scores(df, selected_weights):
+    """Calculates PPM_Current and an enhanced Combined_Score using provided weights."""
+
+    df = _calculate_ppm(df)
+    df = _calculate_trend_score(df)
+    df = _calculate_combined_score(df, selected_weights)
+
+    return df, ""  # Return the modified DataFrame and empty warnings string
 
 
 def _load_and_process_team_df(team_url, all_assets_df_processed):  # Parameter changed
