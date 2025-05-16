@@ -23,72 +23,7 @@ import itertools
 import pulp
 import pandas as pd
 import numpy as np
-
-# --- Configuration ---
-INITIAL_BUDGET = 100.0  # Standard initial budget in F1 Fantasy (in millions)
-ASSET_DATA_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRN0cf_B_U3KoYRAdCbiWrxxEplWZxiy0WQ6KIImEJ4E7mh147bDD5kSUsnDbGYFNChs6FNFQyfQThl/pub?gid=1838985806&single=true&output=csv"
-MY_TEAM_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRN0cf_B_U3KoYRAdCbiWrxxEplWZxiy0WQ6KIImEJ4E7mh147bDD5kSUsnDbGYFNChs6FNFQyfQThl/pub?gid=2095757091&single=true&output=csv"
-MANUAL_ADJUSTMENTS_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRN0cf_B_U3KoYRAdCbiWrxxEplWZxiy0WQ6KIImEJ4E7mh147bDD5kSUsnDbGYFNChs6FNFQyfQThl/pub?gid=1943142711&single=true&output=csv"
-
-# Define the expected metadata columns in asset_data.csv
-# All other columns will be treated as GP points columns
-METADATA_COLUMNS = ["ID", "Name", "Type", "Constructor", "Price", "Active"]
-DEFAULT_FREE_TRANSFERS = 2  # Standard free transfers per week, can be adjusted
-
-# Define keys for weights consistently
-KEY_RECENT_FORM = "recent_form"
-KEY_LAST_RACE = "last_race"
-KEY_PPM = "ppm"
-KEY_TOTAL_POINTS = "total_points"
-KEY_TREND = "trend"
-
-WEIGHT_PROFILES = {
-    "balanced": {
-        KEY_RECENT_FORM: 0.30,
-        KEY_LAST_RACE: 0.20,
-        KEY_PPM: 0.25,
-        KEY_TOTAL_POINTS: 0.15,
-        KEY_TREND: 0.10,
-    },
-    "aggressive_form": {  # Emphasizes recent performance and momentum
-        KEY_RECENT_FORM: 0.40,
-        KEY_LAST_RACE: 0.25,
-        KEY_PPM: 0.10,
-        KEY_TOTAL_POINTS: 0.10,
-        KEY_TREND: 0.15,
-    },
-    "value_focused": {  # Emphasizes PPM and overall consistency
-        KEY_RECENT_FORM: 0.15,
-        KEY_LAST_RACE: 0.10,
-        KEY_PPM: 0.40,
-        KEY_TOTAL_POINTS: 0.25,
-        KEY_TREND: 0.10,
-    },
-}
-
-COLUMN_NAME_ABBREVIATIONS = {
-    "ID": "ID",  # Keep short ones as is or slightly adjust if needed
-    "Name": "Name",
-    "Type": "Type",  # Though we often omit this in final display
-    "Constructor": "Team",  # Assuming 'Constructor' column holds the F1 Team name
-    "Price": "Price",
-    "Active": "Active",
-    "Purchase_Price": "PurchPr",
-    "Total_Points_So_Far": "TotPts",
-    "Avg_Points_Last_3_Races": "AvgL3",
-    "User_Adjusted_Avg_Points_Last_3_Races": "AdjAvgL3",
-    "Point_Adjustment_Avg3Races": "AdjVal",
-    "Points_Last_Race": "LastR",
-    "Trend_Score": "Trend",
-    "PPM_Current": "PPM_Cur",
-    "PPM_on_Purchase": "PPM_Pur",
-    "Combined_Score": "Score",
-    "Norm_User_Adjusted_Avg_Points_Last_3": "N:AvgL3",
-    "Norm_Points_Last_Race": "N:LastR",
-    "Norm_PPM": "N:PPM",
-    "Norm_Total_Points_So_Far": "N:TotPts",
-    "Norm_Trend_Score": "N:Trend",
-}
+import config
 
 
 def _load_raw_asset_df(asset_data_url):  # Parameter changed
@@ -98,17 +33,16 @@ def _load_raw_asset_df(asset_data_url):  # Parameter changed
         print(f"Attempting to load asset data from URL: {asset_data_url}")
         if (
             not asset_data_url
-            or asset_data_url == "YOUR_GOOGLE_SHEET_URL_FOR_ASSET_DATA_CSV"
         ):  # Check if placeholder
             raise ValueError(
                 "Asset data URL is a placeholder or empty. Please update it in the script's configuration."
             )
         df = pd.read_csv(asset_data_url)
         df.columns = df.columns.str.strip()
-        for col in METADATA_COLUMNS:  # METADATA_COLUMNS is global
+        for col in config.METADATA_COLUMNS:
             if col not in df.columns:
                 raise ValueError(
-                    f"Essential metadata column '{col}' not found in data from {asset_data_url}. Required: {METADATA_COLUMNS}"
+                    f"Essential metadata column '{col}' not found in data from {asset_data_url}. Required: {config.METADATA_COLUMNS}"
                 )
         return df, warnings
     except (
@@ -198,7 +132,6 @@ def _apply_manual_adjustments(df, adjustments_url):
 
     if (
         not adjustments_url
-        or adjustments_url == "YOUR_GOOGLE_SHEET_URL_FOR_MANUAL_ADJUSTMENTS_CSV"
     ):
         print(
             "Info: Manual adjustments URL is a placeholder or empty. No adjustments will be applied."
@@ -451,7 +384,7 @@ def _load_and_process_team_df(team_url, all_assets_df_processed):  # Parameter c
                     my_team_df["Purchase_Price"] = my_team_df["Price"]
                 else:
                     my_team_df["Purchase_Price"] = 0.0
-                warnings += f"\n 'Purchase_Price' defaulted to Current Price from asset data. Effective budget cap: ~${INITIAL_BUDGET:.2f}M."
+                warnings += f"\n 'Purchase_Price' defaulted to Current Price from asset data. Effective budget cap: ~${config.INITIAL_BUDGET:.2f}M."
             # Ensure Purchase_Price is numeric
             if "Purchase_Price" in my_team_df.columns:
                 my_team_df["Purchase_Price"] = pd.to_numeric(
@@ -520,7 +453,7 @@ def load_and_process_data(asset_data_url, team_url, adjustments_url, selected_we
 
     # 3. Calculate base points metrics
     asset_data_df, warn = _calculate_points_metrics(
-        asset_data_df.copy(), METADATA_COLUMNS
+        asset_data_df.copy(), config.METADATA_COLUMNS
     )
     if warn:
         overall_warnings.append(warn)
@@ -594,8 +527,11 @@ def display_team_and_budget_info(team_df, initial_budget, budget_warning_message
             "PPM_on_Purchase",
             "Active",
             "Combined_Score",
-                    'Norm_User_Adjusted_Avg_Points_Last_3', 'Norm_Points_Last_Race',
-        'Norm_PPM', 'Norm_Total_Points_So_Far', 'Norm_Trend_Score'
+            "Norm_User_Adjusted_Avg_Points_Last_3",
+            "Norm_Points_Last_Race",
+            "Norm_PPM",
+            "Norm_Total_Points_So_Far",
+            "Norm_Trend_Score",
         ]
         actual_display_cols = [
             col for col in cols_to_display_original_names if col in team_df.columns
@@ -605,7 +541,7 @@ def display_team_and_budget_info(team_df, initial_budget, budget_warning_message
         # Rename only the columns that are present in df_to_print and in the abbreviation map
         rename_map = {
             k: v
-            for k, v in COLUMN_NAME_ABBREVIATIONS.items()
+            for k, v in config.COLUMN_NAME_ABBREVIATIONS.items()
             if k in df_to_print.columns
         }
         df_to_print.rename(columns=rename_map, inplace=True)
@@ -1550,7 +1486,7 @@ def display_all_asset_stats(all_assets_df):
 
             # Create a specific rename map for only the columns present in df_to_print
             rename_map_for_display = {
-                original_name: COLUMN_NAME_ABBREVIATIONS.get(
+                original_name: config.COLUMN_NAME_ABBREVIATIONS.get(
                     original_name, original_name
                 )
                 for original_name in df_to_print.columns  # Iterate over columns actually in df_to_print
@@ -1689,7 +1625,7 @@ def optimize_wildcard_team(
         # Rename only the columns that are present in df_to_print and in the abbreviation map
         rename_map = {
             k: v
-            for k, v in COLUMN_NAME_ABBREVIATIONS.items()
+            for k, v in config.COLUMN_NAME_ABBREVIATIONS.items()
             if k in df_to_print.columns
         }
         df_to_print.rename(columns=rename_map, inplace=True)
@@ -1796,7 +1732,7 @@ def optimize_limitless_team(all_assets_df, num_drivers_req=5, num_constructors_r
     df_to_print = limitless_team_df[actual_display_cols].copy()
     # Rename only the columns that are present in df_to_print and in the abbreviation map
     rename_map = {
-        k: v for k, v in COLUMN_NAME_ABBREVIATIONS.items() if k in df_to_print.columns
+        k: v for k, v in config.COLUMN_NAME_ABBREVIATIONS.items() if k in df_to_print.columns
     }
     df_to_print.rename(columns=rename_map, inplace=True)
 
@@ -1824,7 +1760,7 @@ def optimize_limitless_team(all_assets_df, num_drivers_req=5, num_constructors_r
 def main():
     # --- Profile Selection ---
     # (Your existing profile selection logic here - ensure selected_weights is defined)
-    profile_options = list(WEIGHT_PROFILES.keys())
+    profile_options = list(config.WEIGHT_PROFILES.keys())
     default_profile_name = "balanced"
     selected_profile_name = default_profile_name
 
@@ -1849,7 +1785,7 @@ def main():
     except ValueError:
         print(f"Invalid input. Using default '{default_profile_name.title()}' profile.")
 
-    selected_weights = WEIGHT_PROFILES[selected_profile_name]
+    selected_weights = config.WEIGHT_PROFILES[selected_profile_name]
     print(f"Using '{selected_profile_name.replace('_', ' ').title()}' profile.")
 
     # --- Data Loading ---
@@ -1857,9 +1793,9 @@ def main():
     # is set up to handle its absence gracefully. It's easier to always call it the same way.
     # Manual adjustments will still apply if the file is present.
     all_assets_df, my_team_df, warning_msg = load_and_process_data(
-        ASSET_DATA_URL,  # Using URL constants
-        MY_TEAM_URL,  # Using URL constants
-        MANUAL_ADJUSTMENTS_URL,  # Using URL constants
+        config.ASSET_DATA_URL,  # Using URL constants
+        config.MY_TEAM_URL,  # Using URL constants
+        config.MANUAL_ADJUSTMENTS_URL,  # Using URL constants
         selected_weights,
     )
 
@@ -1878,7 +1814,7 @@ def main():
     mode_choice = input("Enter choice (1-5, default: 1): ") or "1"
 
     # Common variables needed for some modes - initialize them
-    dynamic_budget = INITIAL_BUDGET  # Default if no team data
+    dynamic_budget = config.INITIAL_BUDGET  # Default if no team data
     current_team_value = 0.0  # Default if no team data
 
     if (
@@ -1886,13 +1822,13 @@ def main():
     ):  # Modes that require team data and initial budget display
         if my_team_df is not None and not my_team_df.empty:
             dynamic_budget, current_team_value = display_team_and_budget_info(
-                my_team_df, INITIAL_BUDGET, warning_msg
+                my_team_df, config.INITIAL_BUDGET, warning_msg
             )
         elif (
-            MY_TEAM_URL and MY_TEAM_URL != "YOUR_GOOGLE_SHEET_URL_FOR_MY_TEAM_CSV"
+            config.MY_TEAM_URL and config.MY_TEAM_URL != "config.YOUR_GOOGLE_SHEET_URL_FOR_MY_TEAM_CSV"
         ):  # If a team URL was specified but loading failed
             print(
-                f"\nWarning: Could not load team data from {MY_TEAM_URL}. Mode '{mode_choice}' requires team data."
+                f"\nWarning: Could not load team data from {config.MY_TEAM_URL}. Mode '{mode_choice}' requires team data."
             )
             return  # Exit if mode requires team data and it's missing
 
@@ -1908,7 +1844,7 @@ def main():
         # This print block is fine here as it's specific to this mode's context
         print(f"\nYou have {num_mandatory_transfers} mandatory transfer(s).")
         print(
-            f"The system will consider up to {DEFAULT_FREE_TRANSFERS} total transfers based on a team budget cap of ${dynamic_budget:.2f}M."
+            f"The system will consider up to {config.DEFAULT_FREE_TRANSFERS} total transfers based on a team budget cap of ${dynamic_budget:.2f}M."
         )
         suggest_swaps(
             all_assets_df,
@@ -1916,12 +1852,12 @@ def main():
             mandatory_transfers_df,
             dynamic_budget,
             current_team_value,
-            DEFAULT_FREE_TRANSFERS,
+            config.DEFAULT_FREE_TRANSFERS,
             num_mandatory_transfers,
         )
 
     elif mode_choice == "2":
-        optimize_wildcard_team(all_assets_df, INITIAL_BUDGET)
+        optimize_wildcard_team(all_assets_df, config.INITIAL_BUDGET)
 
     elif mode_choice == "3":
         if my_team_df is None or my_team_df.empty:
