@@ -67,10 +67,10 @@ WEIGHT_PROFILES = {
 }
 
 COLUMN_NAME_ABBREVIATIONS = {
-    "ID": "ID", # Keep short ones as is or slightly adjust if needed
+    "ID": "ID",  # Keep short ones as is or slightly adjust if needed
     "Name": "Name",
-    "Type": "Type", # Though we often omit this in final display
-    "Constructor": "Team", # Assuming 'Constructor' column holds the F1 Team name
+    "Type": "Type",  # Though we often omit this in final display
+    "Constructor": "Team",  # Assuming 'Constructor' column holds the F1 Team name
     "Price": "Price",
     "Active": "Active",
     "Purchase_Price": "PurchPr",
@@ -87,7 +87,7 @@ COLUMN_NAME_ABBREVIATIONS = {
     "Norm_Points_Last_Race": "N_LastR",
     "Norm_PPM": "N_PPM",
     "Norm_Total_Points_So_Far": "N_TotPts",
-    "Norm_Trend_Score": "N_Trend"
+    "Norm_Trend_Score": "N_Trend",
 }
 
 
@@ -499,9 +499,7 @@ def _load_and_process_team_df(team_url, all_assets_df_processed):  # Parameter c
     return my_team_df, warnings
 
 
-def load_and_process_data(
-    asset_data_url, team_url, adjustments_url, selected_weights
-):
+def load_and_process_data(asset_data_url, team_url, adjustments_url, selected_weights):
     """Main function to load and process asset data, team data, and adjustments."""
     overall_warnings = []
 
@@ -567,9 +565,14 @@ def load_and_process_data(
 
 
 def display_team_and_budget_info(team_df, initial_budget, budget_warning_message):
-    """Displays current team information and budget."""
+    """Displays current team information and budget with abbreviated column headers."""
     if team_df is None:
-        return 0.0  # Return 0 for dynamic budget if team_df is None
+        # Added a print message for this case, and ensured it returns expected tuple
+        print("\n--- Your Current Team ---")
+        print("Team data is not available or empty.")
+        if budget_warning_message:
+            print(f"\n{budget_warning_message}")
+        return initial_budget, 0.0  # Default dynamic_budget and current_team_value
 
     print("\n--- Your Current Team ---")
     if team_df.empty:
@@ -577,7 +580,7 @@ def display_team_and_budget_info(team_df, initial_budget, budget_warning_message
         team_current_value = 0.0
         team_purchase_cost = 0.0
     else:
-        cols_to_display = [
+        cols_to_display_original_names = [
             "ID",
             "Name",
             "Type",
@@ -586,34 +589,55 @@ def display_team_and_budget_info(team_df, initial_budget, budget_warning_message
             "Purchase_Price",
             "Total_Points_So_Far",
             "Avg_Points_Last_3_Races",
-            "User_Adjusted_Avg_Points_Last_3_Races",  # New
-            "Point_Adjustment_Avg3Races",  # New
+            "User_Adjusted_Avg_Points_Last_3_Races",
+            "Point_Adjustment_Avg3Races",
             "Points_Last_Race",
+            "Trend_Score",  # Added Trend_Score
             "PPM_Current",
             "PPM_on_Purchase",
             "Active",
             "Combined_Score",
         ]
-        # Ensure all columns in cols_to_display actually exist in team_df
-        displayable_cols = [col for col in cols_to_display if col in team_df.columns]
-        print(team_df[displayable_cols].to_string(index=False, na_rep="NaN"))
-        team_current_value = team_df["Price"].sum()
+        actual_display_cols = [
+            col for col in cols_to_display_original_names if col in team_df.columns
+        ]
+
+        df_to_print = team_df[actual_display_cols].copy()
+        # Rename only the columns that are present in df_to_print and in the abbreviation map
+        rename_map = {
+            k: v
+            for k, v in COLUMN_NAME_ABBREVIATIONS.items()
+            if k in df_to_print.columns
+        }
+        df_to_print.rename(columns=rename_map, inplace=True)
+
+        # Temporarily set display options for this print
+        with pd.option_context(
+            "display.max_rows",
+            None,
+            "display.width",
+            200,  # Adjust as needed
+            "display.max_colwidth",
+            None,
+            "display.float_format",
+            "{:.2f}".format,
+        ):
+            print(df_to_print.to_string(index=False, na_rep="NaN"))
+
+        team_current_value = team_df["Price"].sum()  # Use original team_df for sums
         team_purchase_cost = team_df["Purchase_Price"].sum()
 
+    # ... (rest of the budget printing logic remains the same) ...
     print(f"\nTotal Team Current Market Value: ${team_current_value:,.2f}M")
     print(f"Total Team Assumed Purchase Cost: ${team_purchase_cost:,.2f}M")
-
     value_gain_loss = team_current_value - team_purchase_cost
     dynamic_budget = initial_budget + value_gain_loss
-
     print(
         f"Team Value Gain/(Loss) since initial purchase (defaulted): ${value_gain_loss:,.2f}M"
     )
     print(f"Current Dynamic Budget: ${dynamic_budget:,.2f}M")
-
     if budget_warning_message:
-        print(f"\n{budget_warning_message}")
-
+        print(f"\n{budget_warning_message.strip()}")  # Ensure stripping newlines if any
     if not team_df.empty:
         num_drivers = len(team_df[team_df["Type"] == "Driver"])
         num_constructors = len(team_df[team_df["Type"] == "Constructor"])
@@ -624,7 +648,6 @@ def display_team_and_budget_info(team_df, initial_budget, budget_warning_message
             print(
                 "WARNING: Team composition might be invalid (expected 5 Drivers, 2 Constructors)."
             )
-
     return dynamic_budget, team_current_value
 
 
@@ -1472,7 +1495,7 @@ def display_suggestions(suggestion_list, suggestion_type_name, dynamic_budget=No
 def display_all_asset_stats(all_assets_df):
     """
     Displays a table of calculated statistics for all assets,
-    separating Drivers and Constructors, and sorting them.
+    separating Drivers and Constructors, using abbreviated column headers.
     Type column is omitted from display. Inactive assets are listed last.
     """
     if all_assets_df is None or all_assets_df.empty:
@@ -1481,14 +1504,13 @@ def display_all_asset_stats(all_assets_df):
 
     print("\n--- All Asset Statistics ---")
 
-    # Define the columns you want to see, EXCLUDING 'Type'
-    # 'Active' column is kept to show status.
-    cols_to_display = [
+    # Define the original column names you want to see in this overview
+    cols_to_display_original_names = [
         "ID",
         "Name",
         "Constructor",
         "Price",
-        "Active",
+        "Active",  # 'Type' is intentionally omitted for this display
         "Total_Points_So_Far",
         "Avg_Points_Last_3_Races",
         "User_Adjusted_Avg_Points_Last_3_Races",
@@ -1497,58 +1519,45 @@ def display_all_asset_stats(all_assets_df):
         "Trend_Score",
         "PPM_Current",
         "Combined_Score",
-        # You can add normalized components here if desired for a very detailed view
-        # 'Norm_User_Adjusted_Avg_Points_Last_3', 'Norm_Points_Last_Race',
-        # 'Norm_PPM', 'Norm_Total_Points_So_Far', 'Norm_Trend_Score'
     ]
 
-    # Filter for columns that actually exist in all_assets_df to avoid KeyErrors
+    # Filter for columns that actually exist in all_assets_df
     actual_display_cols = [
-        col for col in cols_to_display if col in all_assets_df.columns
+        col for col in cols_to_display_original_names if col in all_assets_df.columns
     ]
 
-    # Set pandas display options to show all rows and customize float format
-    # These are set once before printing both tables
+    # Set pandas display options
     pd.set_option("display.max_rows", None)
-    pd.set_option("display.width", 120)  # Adjust width to see more columns if needed
-    pd.set_option("display.max_colwidth", None)  # Adjust colwidth if needed
+    pd.set_option("display.width", 200)  # Adjust as needed, or None for terminal width
+    pd.set_option("display.max_colwidth", None)
     pd.set_option("display.float_format", "{:.2f}".format)
 
-    # --- Process and Display Drivers ---
-    drivers_df = all_assets_df[all_assets_df["Type"] == "Driver"].copy()
-    if not drivers_df.empty:
-        # Sort by Active (True first, so False is descending), then by Combined_Score (descending)
-        drivers_df_sorted = drivers_df.sort_values(
-            by=["Active", "Combined_Score"],
-            ascending=[False, False],  # Active=True first, then highest Combined_Score
-        )
-        print("\n--- Driver Statistics ---")
-        print(
-            drivers_df_sorted[actual_display_cols].to_string(index=False, na_rep="N/A")
-        )
-    else:
-        print("\n--- Driver Statistics ---")
-        print("No driver data to display.")
+    for asset_type_to_display in ["Driver", "Constructor"]:
+        type_df = all_assets_df[all_assets_df["Type"] == asset_type_to_display].copy()
 
-    # --- Process and Display Constructors ---
-    constructors_df = all_assets_df[all_assets_df["Type"] == "Constructor"].copy()
-    if not constructors_df.empty:
-        # Sort by Active (True first), then by Combined_Score (descending)
-        constructors_df_sorted = constructors_df.sort_values(
-            by=["Active", "Combined_Score"],
-            ascending=[False, False],  # Active=True first, then highest Combined_Score
-        )
-        print("\n--- Constructor Statistics ---")
-        print(
-            constructors_df_sorted[actual_display_cols].to_string(
-                index=False, na_rep="N/A"
+        print(f"\n--- {asset_type_to_display} Statistics ---")
+        if not type_df.empty:
+            type_df_sorted = type_df.sort_values(
+                by=["Active", "Combined_Score"], ascending=[False, False]
             )
-        )
-    else:
-        print("\n--- Constructor Statistics ---")
-        print("No constructor data to display.")
 
-    # Reset pandas display options to default
+            # Create a DataFrame with only the columns to be displayed
+            df_to_print = type_df_sorted[actual_display_cols].copy()
+
+            # Create a specific rename map for only the columns present in df_to_print
+            rename_map_for_display = {
+                original_name: COLUMN_NAME_ABBREVIATIONS.get(
+                    original_name, original_name
+                )
+                for original_name in df_to_print.columns  # Iterate over columns actually in df_to_print
+            }
+            df_to_print.rename(columns=rename_map_for_display, inplace=True)
+
+            print(df_to_print.to_string(index=False, na_rep="N/A"))
+        else:
+            print(f"No {asset_type_to_display.lower()} data to display.")
+
+    # Reset pandas display options
     pd.reset_option("display.max_rows")
     pd.reset_option("display.width")
     pd.reset_option("display.max_colwidth")
@@ -1655,8 +1664,7 @@ def optimize_wildcard_team(
             all_assets_df["ID"].isin(selected_asset_ids)
         ].copy()
 
-        # Ensure correct columns for display
-        display_cols = [
+        display_cols_original_names = [  # Use original names here
             "ID",
             "Name",
             "Type",
@@ -1669,13 +1677,30 @@ def optimize_wildcard_team(
             "Total_Points_So_Far",
             "PPM_Current",
         ]
-
-        # Filter for columns that actually exist in optimal_team_df
         actual_display_cols = [
-            col for col in display_cols if col in optimal_team_df.columns
+            col for col in display_cols_original_names if col in optimal_team_df.columns
         ]
 
-        print(optimal_team_df[actual_display_cols].to_string(index=False))
+        df_to_print = optimal_team_df[actual_display_cols].copy()
+        # Rename only the columns that are present in df_to_print and in the abbreviation map
+        rename_map = {
+            k: v
+            for k, v in COLUMN_NAME_ABBREVIATIONS.items()
+            if k in df_to_print.columns
+        }
+        df_to_print.rename(columns=rename_map, inplace=True)
+
+        with pd.option_context(
+            "display.max_rows",
+            None,
+            "display.width",
+            200,  # Adjust
+            "display.max_colwidth",
+            None,
+            "display.float_format",
+            "{:.2f}".format,
+        ):
+            print(df_to_print.to_string(index=False, na_rep="NaN"))
 
         total_cost = optimal_team_df["Price"].sum()
         total_score = optimal_team_df["Combined_Score"].sum()
@@ -1747,24 +1772,41 @@ def optimize_limitless_team(all_assets_df, num_drivers_req=5, num_constructors_r
         )
         return
 
-    display_cols = [
+    display_cols_original_names = [  # Use original names here
         "ID",
         "Name",
         "Type",
         "Constructor",
         "Price",
         "Combined_Score",
+        "Avg_Points_Last_3_Races",
         "User_Adjusted_Avg_Points_Last_3_Races",
         "Points_Last_Race",
         "Total_Points_So_Far",
         "PPM_Current",
     ]
-
     actual_display_cols = [
-        col for col in display_cols if col in limitless_team_df.columns
+        col for col in display_cols_original_names if col in limitless_team_df.columns
     ]
 
-    print(limitless_team_df[actual_display_cols].to_string(index=False))
+    df_to_print = limitless_team_df[actual_display_cols].copy()
+    # Rename only the columns that are present in df_to_print and in the abbreviation map
+    rename_map = {
+        k: v for k, v in COLUMN_NAME_ABBREVIATIONS.items() if k in df_to_print.columns
+    }
+    df_to_print.rename(columns=rename_map, inplace=True)
+
+    with pd.option_context(
+        "display.max_rows",
+        None,
+        "display.width",
+        200,  # Adjust
+        "display.max_colwidth",
+        None,
+        "display.float_format",
+        "{:.2f}".format,
+    ):
+        print(df_to_print.to_string(index=False, na_rep="NaN"))
 
     total_hypothetical_cost = limitless_team_df["Price"].sum()
     total_score = limitless_team_df["Combined_Score"].sum()
