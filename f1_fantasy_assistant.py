@@ -19,6 +19,7 @@ Configuration parameters such as initial budget, data URLs, and weighting profil
 are defined at the beginning of the script and can be adjusted to customize the analysis.
 """
 
+import argparse
 import itertools
 import pulp
 import pandas as pd
@@ -31,9 +32,7 @@ def _load_raw_asset_df(asset_data_url):  # Parameter changed
     warnings = ""
     try:
         print(f"Attempting to load asset data from URL: {asset_data_url}")
-        if (
-            not asset_data_url
-        ):  # Check if placeholder
+        if not asset_data_url:  # Check if placeholder
             raise ValueError(
                 "Asset data URL is a placeholder or empty. Please update it in the script's configuration."
             )
@@ -130,9 +129,7 @@ def _apply_manual_adjustments(df, adjustments_url):
     # This ensures it exists, even if no adjustments are loaded or merged.
     df["Point_Adjustment_Avg3Races"] = 0.0
 
-    if (
-        not adjustments_url
-    ):
+    if not adjustments_url:
         print(
             "Info: Manual adjustments URL is a placeholder or empty. No adjustments will be applied."
         )
@@ -1732,7 +1729,9 @@ def optimize_limitless_team(all_assets_df, num_drivers_req=5, num_constructors_r
     df_to_print = limitless_team_df[actual_display_cols].copy()
     # Rename only the columns that are present in df_to_print and in the abbreviation map
     rename_map = {
-        k: v for k, v in config.COLUMN_NAME_ABBREVIATIONS.items() if k in df_to_print.columns
+        k: v
+        for k, v in config.COLUMN_NAME_ABBREVIATIONS.items()
+        if k in df_to_print.columns
     }
     df_to_print.rename(columns=rename_map, inplace=True)
 
@@ -1757,45 +1756,84 @@ def optimize_limitless_team(all_assets_df, num_drivers_req=5, num_constructors_r
     print(f"Total Team Combined Score: {total_score:.2f}")
 
 
+def configure_argparse():
+    """
+    Configures the command-line argument parser.
+    """
+    parser = argparse.ArgumentParser(description="F1 Fantasy Assistant")
+
+    parser.add_argument(
+        "--profile",
+        type=str,
+        choices=list(config.WEIGHT_PROFILES.keys()),
+        default="balanced",
+        help=(
+            "Select the weighting profile for Combined_Score calculation. "
+            f"Options: {', '.join(config.WEIGHT_PROFILES.keys())}. Default: balanced."
+        ),
+    )
+    parser.add_argument(
+        "--mode",
+        type=str,
+        choices=["weekly", "wildcard", "target_swap", "limitless", "all_stats"],
+        default="weekly",
+        help=(
+            "Select the mode of operation: "
+            "weekly (transfer suggestions), "
+            "wildcard (budgeted team build), "
+            "target_swap (specific 2-part transfer), "
+            "limitless (no-budget team build), "
+            "all_stats (display all asset stats). "
+            "Default: weekly."
+        ),
+    )
+    # Arguments specific to 'target_swap' mode
+    parser.add_argument(
+        "--sell_id",
+        type=str,
+        help="ID of the asset to SELL (required for 'target_swap' mode, case-insensitive, will be uppercased).",
+    )
+    parser.add_argument(
+        "--buy_id",
+        type=str,
+        help="ID of the asset to BUY (required for 'target_swap' mode, case-insensitive, will be uppercased).",
+    )
+    # Optional general arguments (can be expanded)
+    parser.add_argument(
+        "--transfers",
+        type=int,
+        default=config.DEFAULT_FREE_TRANSFERS,
+        help=f"Number of free transfers for weekly mode. Default: {config.DEFAULT_FREE_TRANSFERS}",
+    )
+    parser.add_argument(
+        "--budget",
+        type=float,
+        default=config.INITIAL_BUDGET,
+        help=f"Initial budget for wildcard mode. Default: {config.INITIAL_BUDGET}",
+    )
+    # You could also add arguments to override config.ASSET_DATA_URL etc. if needed
+
+    return parser
+
+
 def main():
-    # --- Profile Selection ---
-    # (Your existing profile selection logic here - ensure selected_weights is defined)
-    profile_options = list(config.WEIGHT_PROFILES.keys())
-    default_profile_name = "balanced"
-    selected_profile_name = default_profile_name
 
-    print("\n--- Select Weighting Profile for Combined_Score ---")
-    for i, name in enumerate(profile_options):
-        print(f"{i+1}. {name.replace('_', ' ').title()}")
+    args = configure_argparse().parse_args()
 
-    try:
-        profile_choice_input = input(
-            f"Enter choice (1-{len(profile_options)}, default: {default_profile_name.title()}): "
-        )
-        if profile_choice_input:
-            profile_choice_idx = int(profile_choice_input) - 1
-            if 0 <= profile_choice_idx < len(profile_options):
-                selected_profile_name = profile_options[profile_choice_idx]
-            else:
-                print(
-                    f"Invalid choice. Using default '{default_profile_name.title()}' profile."
-                )
-        else:
-            print(f"No input. Using default '{default_profile_name.title()}' profile.")
-    except ValueError:
-        print(f"Invalid input. Using default '{default_profile_name.title()}' profile.")
-
-    selected_weights = config.WEIGHT_PROFILES[selected_profile_name]
-    print(f"Using '{selected_profile_name.replace('_', ' ').title()}' profile.")
+    # --- Use selected profile ---
+    selected_profile_name = args.profile
+    selected_weights = config.WEIGHT_PROFILES.get(
+        selected_profile_name, config.WEIGHT_PROFILES["balanced"]
+    )
+    print(
+        f"Using '{selected_profile_name.replace('_', ' ').title()}' weighting profile."
+    )
 
     # --- Data Loading ---
-    # For "All Asset Stats" mode, we don't strictly need my_team.csv, but load_and_process_data
-    # is set up to handle its absence gracefully. It's easier to always call it the same way.
-    # Manual adjustments will still apply if the file is present.
     all_assets_df, my_team_df, warning_msg = load_and_process_data(
-        config.ASSET_DATA_URL,  # Using URL constants
-        config.MY_TEAM_URL,  # Using URL constants
-        config.MANUAL_ADJUSTMENTS_URL,  # Using URL constants
+        config.ASSET_DATA_URL,
+        config.MY_TEAM_URL,
+        config.MANUAL_ADJUSTMENTS_URL,
         selected_weights,
     )
 
@@ -1803,48 +1841,42 @@ def main():
         print("Exiting due to critical error in loading asset data.")
         return
 
-    # --- Mode Selection ---
-    print("\nChoose mode:")
-    print("1. Weekly Transfer Suggestions (Automated)")
-    print("2. Wildcard Team Optimizer (Budgeted)")
-    print("3. Target-Based Double Transfer Assistant")
-    print("4. Limitless Chip Optimizer (No Budget)")
-    print("5. Display All Asset Stats")  # New Option
+    # --- Mode Execution ---
+    dynamic_budget = args.budget  # Use budget from args, defaults to INITIAL_BUDGET
+    current_team_value = 0.0
 
-    mode_choice = input("Enter choice (1-5, default: 1): ") or "1"
-
-    # Common variables needed for some modes - initialize them
-    dynamic_budget = config.INITIAL_BUDGET  # Default if no team data
-    current_team_value = 0.0  # Default if no team data
-
-    if (
-        mode_choice != "5" and mode_choice != "2" and mode_choice != "4"
-    ):  # Modes that require team data and initial budget display
+    # Display team info for modes that require it, if team data is present
+    if args.mode in ["weekly", "target_swap"]:
         if my_team_df is not None and not my_team_df.empty:
+            # Pass args.budget as the initial_budget reference here if it's meant to be the overall cap
+            # The function display_team_and_budget_info calculates dynamic_budget based on team value.
+            # Let's use config.INITIAL_BUDGET for calculating gain/loss from original state for display.
             dynamic_budget, current_team_value = display_team_and_budget_info(
                 my_team_df, config.INITIAL_BUDGET, warning_msg
             )
         elif (
-            config.MY_TEAM_URL and config.MY_TEAM_URL != "config.YOUR_GOOGLE_SHEET_URL_FOR_MY_TEAM_CSV"
-        ):  # If a team URL was specified but loading failed
+            config.MY_TEAM_URL
+            and config.MY_TEAM_URL != "YOUR_GOOGLE_SHEET_URL_FOR_MY_TEAM_CSV"
+        ):
             print(
-                f"\nWarning: Could not load team data from {config.MY_TEAM_URL}. Mode '{mode_choice}' requires team data."
+                f"\nWarning: Could not load team data from {config.MY_TEAM_URL}. Mode '{args.mode}' requires team data."
             )
-            return  # Exit if mode requires team data and it's missing
+            return
 
-    if mode_choice == "1":
-        if my_team_df is None or my_team_df.empty:  # Redundant check, but safe
+    print(f"\nExecuting Mode: {args.mode.replace('_', ' ').title()}")
+
+    if args.mode == "weekly":
+        if my_team_df is None or my_team_df.empty:
             print(
                 "Cannot proceed with weekly transfers: Team data is missing or empty."
             )
             return
         mandatory_transfers_df = identify_mandatory_transfers(my_team_df)
         num_mandatory_transfers = len(mandatory_transfers_df)
-        # ... (rest of your existing mode '1' logic for calling suggest_swaps) ...
-        # This print block is fine here as it's specific to this mode's context
+
         print(f"\nYou have {num_mandatory_transfers} mandatory transfer(s).")
         print(
-            f"The system will consider up to {config.DEFAULT_FREE_TRANSFERS} total transfers based on a team budget cap of ${dynamic_budget:.2f}M."
+            f"The system will consider up to {args.transfers} total transfers based on a team budget cap of ${dynamic_budget:.2f}M."
         )
         suggest_swaps(
             all_assets_df,
@@ -1852,54 +1884,49 @@ def main():
             mandatory_transfers_df,
             dynamic_budget,
             current_team_value,
-            config.DEFAULT_FREE_TRANSFERS,
-            num_mandatory_transfers,
+            args.transfers,
+            num_mandatory_transfers,  # Use transfers from args
         )
+    elif args.mode == "wildcard":
+        optimize_wildcard_team(all_assets_df, args.budget)  # Use budget from args
 
-    elif mode_choice == "2":
-        optimize_wildcard_team(all_assets_df, config.INITIAL_BUDGET)
-
-    elif mode_choice == "3":
+    elif args.mode == "target_swap":
         if my_team_df is None or my_team_df.empty:
             print(
                 "Cannot proceed with target-based swap: Team data is missing or empty."
             )
             return
-        # display_team_and_budget_info was already called if my_team_df is valid
-        # ... (your existing target-based swap logic) ...
-        print("\n--- Target-Based Double Transfer Input ---")
-        fixed_sell_id = (
-            input(
-                f"Enter ID of asset to SELL from your team (e.g., {my_team_df['ID'].iloc[0] if not my_team_df.empty else 'ALP'}): "
+
+        if not args.sell_id or not args.buy_id:
+            parser.error(
+                "For 'target_swap' mode, both --sell_id and --buy_id must be provided."
             )
-            .strip()
-            .upper()
-        )
-        fixed_buy_id = (
-            input("Enter ID of asset to BUY from all available assets (e.g., WIL): ")
-            .strip()
-            .upper()
-        )
-        if fixed_sell_id and fixed_buy_id:
+            # Alternatively, prompt if missing:
+            # sell_id = args.sell_id.strip().upper() if args.sell_id else input("Enter ID of asset to SELL: ").strip().upper()
+            # buy_id = args.buy_id.strip().upper() if args.buy_id else input("Enter ID of asset to BUY: ").strip().upper()
+        else:
+            sell_id = args.sell_id.strip().upper()
+            buy_id = args.buy_id.strip().upper()
+            print(
+                f"\n--- Target-Based Double Transfer for Sell: {sell_id}, Buy: {buy_id} ---"
+            )
             suggest_target_based_double_swap(
-                fixed_sell_id,
-                fixed_buy_id,
+                sell_id,
+                buy_id,
                 all_assets_df,
                 my_team_df,
                 dynamic_budget,
                 current_team_value,
             )
-        else:
-            print("Both asset IDs (sell and buy) must be provided.")
 
-    elif mode_choice == "4":
+    elif args.mode == "limitless":
         optimize_limitless_team(all_assets_df)
 
-    elif mode_choice == "5":  # New mode
+    elif args.mode == "all_stats":
         display_all_asset_stats(all_assets_df)
 
-    else:
-        print("Invalid mode choice. Exiting.")
+    else:  # Should be caught by argparse choices, but as a fallback
+        print("Invalid mode choice selected via arguments. Exiting.")
 
 
 if __name__ == "__main__":
