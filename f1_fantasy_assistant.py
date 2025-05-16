@@ -1,7 +1,7 @@
+#!/usr/bin/env python3
 # This script is a Python module for managing and analyzing F1 Fantasy teams.
 
 import itertools
-import os
 import pulp
 import pandas as pd
 import numpy as np
