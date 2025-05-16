@@ -21,17 +21,21 @@ are defined at the beginning of the script and can be adjusted to customize the 
 
 import argparse
 import itertools
+import logging
 import pulp
 import pandas as pd
 import numpy as np
 import config
+
+logger = logging.getLogger("F1FantasyAssistant")
 
 
 def _load_raw_asset_df(asset_data_url):  # Parameter changed
     """Loads and performs initial validation on asset_data from a URL."""
     warnings = ""
     try:
-        print(f"Attempting to load asset data from URL: {asset_data_url}")
+        logger.debug("Attempting to load asset data from URL: %s", asset_data_url)
+
         if not asset_data_url:  # Check if placeholder
             raise ValueError(
                 "Asset data URL is a placeholder or empty. Please update it in the script's configuration."
@@ -82,20 +86,25 @@ def _calculate_points_metrics(df, metadata_cols_list):
             df["Avg_Points_Last_3_Races"] = 0.0
             df["Points_Last_Race"] = 0.0
         else:
-            print(f"Identified completed GP columns: {completed_gp_cols}")
+            logger.debug("Identified completed GP columns: %s", completed_gp_cols)
+
             df["Total_Points_So_Far"] = df[completed_gp_cols].sum(axis=1, skipna=True)
 
             num_races_to_avg = min(len(completed_gp_cols), 3)
             if num_races_to_avg > 0:
                 last_n_cols = completed_gp_cols[-num_races_to_avg:]
-                print(f"Calculating Avg_Points_Last_3_Races based on: {last_n_cols}")
+                logger.debug(
+                    "Calculating Avg_Points_Last_3_Races based on: %s", last_n_cols
+                )
                 df["Avg_Points_Last_3_Races"] = (
                     df[last_n_cols].mean(axis=1, skipna=True).fillna(0)
                 )
             else:
                 df["Avg_Points_Last_3_Races"] = 0.0
 
-            print(f"Calculating Points_Last_Race based on: {completed_gp_cols[-1]}")
+            logger.debug(
+                "Calculating Points_Last_Race based on: %s", completed_gp_cols[-1]
+            )
             df["Points_Last_Race"] = df[completed_gp_cols[-1]].fillna(0)
 
     return df, warnings
@@ -130,8 +139,8 @@ def _apply_manual_adjustments(df, adjustments_url):
     df["Point_Adjustment_Avg3Races"] = 0.0
 
     if not adjustments_url:
-        print(
-            "Info: Manual adjustments URL is a placeholder or empty. No adjustments will be applied."
+        logger.info(
+            "Manual adjustments URL is a placeholder or empty. No adjustments will be applied."
         )
         # df['User_Adjusted_Avg_Points_Last_3_Races'] will be calculated later using the initialized 0.0
         if (
@@ -142,7 +151,9 @@ def _apply_manual_adjustments(df, adjustments_url):
         return df, warnings
 
     try:
-        print(f"Attempting to load manual adjustments from URL: {adjustments_url}")
+        logger.debug(
+            "Attempting to load manual adjustments from URL: %s", adjustments_url
+        )
         adj_df = pd.read_csv(adjustments_url)
         adj_df.columns = adj_df.columns.str.strip()
 
@@ -165,7 +176,7 @@ def _apply_manual_adjustments(df, adjustments_url):
             # This will align adjustments by ID and fill with NaN for IDs in df not in adjustment_map
             df["Point_Adjustment_Avg3Races"] = df["ID"].map(adjustment_map).fillna(0)
 
-            print("Successfully loaded and applied manual adjustments.")
+            logger.info("Successfully loaded and applied manual adjustments.")
         else:
             warnings += f"\nWarning: Data from {adjustments_url} is missing 'ID' or 'Point_Adjustment_Avg3Races' column. Adjustments not applied (using 0).."
     except Exception as e:
@@ -205,8 +216,9 @@ def _calculate_ppm(df):
             missing_cols.append("Price")
         if not total_points_present:
             missing_cols.append("Total_Points_So_Far")
-        print(
-            f"Warning: Missing columns {missing_cols} for PPM_Current calculation. Setting PPM_Current to 0."
+        logger.warning(
+            "Missing columns %s for PPM_Current calculation. Setting PPM_Current to 0.",
+            missing_cols,
         )
     return df
 
@@ -227,8 +239,9 @@ def _calculate_trend_score(df):
             missing_cols.append("Points_Last_Race")
         if not adjusted_avg_present:
             missing_cols.append("User_Adjusted_Avg_Points_Last_3_Races")
-        print(
-            f"Warning: Missing columns {missing_cols} for Trend_Score calculation. Setting Trend_Score to 0."
+        logger.warning(
+            "Missing columns %s for Trend_Score calculation. Setting Trend_Score to 0.",
+            missing_cols,
         )
     df["Trend_Score"] = df["Trend_Score"].fillna(0)
     return df
@@ -240,12 +253,12 @@ def _normalize_series(series):
     max_val = series.max()
 
     if pd.isna(min_val) or pd.isna(max_val):
-        print("Warning: Series contains NaN values. Returning series filled with 0.5.")
+        logger.warning("Series contains NaN values. Returning series filled with 0.5.")
         return pd.Series([0.5] * len(series), index=series.index)
 
     if max_val == min_val:
-        print(
-            "Warning: Series has the same min and max value. Returning series filled with 0.5."
+        logger.warning(
+            "Series has the same min and max value. Returning series filled with 0.5."
         )
         return pd.Series([0.5] * len(series), index=series.index)
 
@@ -318,7 +331,7 @@ def _load_and_process_team_df(team_url, all_assets_df_processed):  # Parameter c
         return None, warnings
 
     try:
-        print(f"Attempting to load team data from URL: {team_url}")
+        logger.debug("Attempting to load team data from URL: %s", team_url)
         my_team_df_raw = pd.read_csv(team_url)
         my_team_df_raw.columns = my_team_df_raw.columns.str.strip()
 
@@ -327,7 +340,6 @@ def _load_and_process_team_df(team_url, all_assets_df_processed):  # Parameter c
             purchase_price_was_missing_in_file = True
             warnings += f"\nWarning: 'Purchase_Price' column not found in team data from {team_url}."
         else:
-            # ... (your existing Purchase_Price parsing logic for my_team_df_raw) ...
             cols_to_select_from_raw.append("Purchase_Price")
             if my_team_df_raw["Purchase_Price"].dtype == "object":
                 my_team_df_raw["Purchase_Price"] = (
@@ -340,7 +352,6 @@ def _load_and_process_team_df(team_url, all_assets_df_processed):  # Parameter c
                     my_team_df_raw["Purchase_Price"], errors="coerce"
                 ).fillna(0)
 
-        # ... (rest of the merge and processing logic for my_team_df, this part is largely the same) ...
         # Ensure cols_to_merge_from_assets and actual_cols_to_merge are correctly defined
         cols_to_merge_from_assets = [
             "ID",
@@ -427,68 +438,74 @@ def _load_and_process_team_df(team_url, all_assets_df_processed):  # Parameter c
 
 
 def load_and_process_data(asset_data_url, team_url, adjustments_url, selected_weights):
-    """Main function to load and process asset data, team data, and adjustments."""
-    overall_warnings = []
+    overall_warnings_list = []  # Store individual warning messages
 
-    # 1. Load and validate raw asset data
-    asset_data_df, warn = _load_raw_asset_df(asset_data_url)  # Use URL
+    # Call helpers, they will log their own specific errors/info.
+    # They return a warning string which can be appended for a final summary if needed.
+
+    asset_data_df, warn = _load_raw_asset_df(asset_data_url)
     if warn:
-        overall_warnings.append(warn)
+        overall_warnings_list.append(warn.strip())
     if asset_data_df is None:
-        # ... (handle critical failure as before) ...
-        final_warning_msg = "\n".join(filter(None, overall_warnings))
-        if final_warning_msg.strip():
-            print(
-                f"\n--- Data Loading Log ---\n{final_warning_msg.strip()}\n------------------------"
-            )
-        return None, None, final_warning_msg
+        # _load_raw_asset_df already logged the error.
+        # We still need to collect the message for a potential summary.
+        # The final "Data Loading Log" print can be replaced by a logger.warning if overall_warnings_list is not empty
+        summary_warn_msg = "\n".join(filter(None, overall_warnings_list))
+        if summary_warn_msg:
+            logger.warning("Data loading failed with issues:\n%s", summary_warn_msg)
+        return None, None, summary_warn_msg
 
-    # 2. Preprocess metadata
     asset_data_df, warn = _preprocess_asset_attributes(asset_data_df.copy())
     if warn:
-        overall_warnings.append(warn)
+        overall_warnings_list.append(warn.strip())
 
-    # 3. Calculate base points metrics
     asset_data_df, warn = _calculate_points_metrics(
         asset_data_df.copy(), config.METADATA_COLUMNS
     )
     if warn:
-        overall_warnings.append(warn)
+        overall_warnings_list.append(warn.strip())
 
-    # 4. Apply manual adjustments
     asset_data_df, warn = _apply_manual_adjustments(
         asset_data_df.copy(), adjustments_url
-    )  # Use URL
+    )
     if warn:
-        overall_warnings.append(warn)
+        overall_warnings_list.append(warn.strip())
 
-    # 5. Calculate derived scores
     all_assets_df, warn = _calculate_derived_scores(
         asset_data_df.copy(), selected_weights
     )
     if warn:
-        overall_warnings.append(warn)
+        overall_warnings_list.append(warn.strip())
     if all_assets_df is None:
-        # ... (handle critical failure as before) ...
-        final_warning_msg = "\n".join(filter(None, overall_warnings))
-        if final_warning_msg.strip():
-            print(
-                f"\n--- Data Loading Log ---\n{final_warning_msg.strip()}\n------------------------"
+        summary_warn_msg = "\n".join(filter(None, overall_warnings_list))
+        if summary_warn_msg:
+            logger.warning(
+                "Data processing failed (derived scores) with issues:\n%s",
+                summary_warn_msg,
             )
-        return None, None, final_warning_msg
+        return None, None, summary_warn_msg
 
-    # 6. Load and process team data
-    my_team_df, warn = _load_and_process_team_df(team_url, all_assets_df)  # Use URL
+    my_team_df, warn = _load_and_process_team_df(team_url, all_assets_df)
     if warn:
-        overall_warnings.append(warn)
+        overall_warnings_list.append(warn.strip())
 
-    final_warning_msg = "\n".join(filter(None, overall_warnings))
-    if final_warning_msg.strip():
-        print(
-            f"\n--- Data Loading Log ---\n{final_warning_msg.strip()}\n------------------------"
+    final_summary_warning = "\n".join(filter(None, overall_warnings_list))
+    if final_summary_warning:
+        logger.info(
+            "Data Loading Process Completed with the following warnings:",
+        )
+        for i in final_summary_warning.split("\n"):
+            logger.info(i)
+    else:
+        logger.info(
+            "Data loading and processing completed successfully without warnings."
         )
 
-    return all_assets_df, my_team_df, final_warning_msg
+    return (
+        all_assets_df,
+        my_team_df,
+        final_summary_warning,
+    )
 
 
 def display_team_and_budget_info(team_df, initial_budget, budget_warning_message):
@@ -577,9 +594,10 @@ def display_team_and_budget_info(team_df, initial_budget, budget_warning_message
             f"\nTeam Composition: {num_drivers} Drivers, {num_constructors} Constructors."
         )
         if num_drivers != 5 or num_constructors != 2:
-            print(
-                "WARNING: Team composition might be invalid (expected 5 Drivers, 2 Constructors)."
+            logger.warning(
+                "Team composition might be invalid (expected 5 Drivers, 2 Constructors)."
             )
+
     return dynamic_budget, team_current_value
 
 
@@ -736,12 +754,6 @@ def _suggest_sequential_single_discretionary_swaps(
                                 "Avg_Points_Last_3_Races"
                             ],
                             "sell_last_race_raw": asset_to_sell_row["Points_Last_Race"],
-                            # "sell_total_points_raw": asset_to_sell_row[
-                            #     "Total_Points_So_Far"
-                            # ],  # Ensure this is from asset_to_sell_row
-                            # "sell_trend_raw": asset_to_sell_row[
-                            #     "Trend_Score"
-                            # ],  # Ensure this is from asset_to_sell_row
                             "sell_total_points_raw": asset_to_sell_row.get(
                                 "Total_Points_So_Far", 0.0
                             ),
@@ -758,12 +770,6 @@ def _suggest_sequential_single_discretionary_swaps(
                             "buy_last_race_raw": current_best_buy_for_this_sell[
                                 "Points_Last_Race"
                             ],
-                            # "buy_total_points_raw": current_best_buy_for_this_sell[
-                            #     "Total_Points_So_Far"
-                            # ],  # From current_best_buy_for_this_sell
-                            # "buy_trend_raw": current_best_buy_for_this_sell[
-                            #     "Trend_Score"
-                            # ],  # From current_best_buy_for_this_sell
                             "buy_total_points_raw": current_best_buy_for_this_sell.get(
                                 "Total_Points_So_Far", 0.0
                             ),
@@ -962,7 +968,7 @@ def suggest_swaps(
     }
 
     if all_assets_df is None or my_team_df is None or my_team_df.empty:
-        print("Cannot generate suggestions: missing asset data or team data.")
+        logger.warning("Cannot generate suggestions: missing asset data or team data.")
         return suggestions
 
     owned_ids = list(my_team_df["ID"])
@@ -972,7 +978,6 @@ def suggest_swaps(
 
     # --- 1. Handle Mandatory Transfers ---
     if num_mandatory_transfers > 0:
-        # ... (your existing mandatory transfer logic call) ...
         print("\n--- Suggestions for Mandatory Replacements ---")
         mandatory_replacement_suggestions = _suggest_mandatory_replacements(
             mandatory_transfers_df,
@@ -1018,7 +1023,7 @@ def suggest_swaps(
     # --- 4. Handle True Double Discretionary Swaps ---
     # Only suggest double swaps if 2 discretionary transfers are actually available
     if num_discretionary_transfers_available == 2:
-        print(f"\n--- Suggestions for True Double Swap (2 out, 2 in) ---")
+        print("\n--- Suggestions for True Double Swap (2 out, 2 in) ---")
         double_swap_suggestions = _suggest_true_double_discretionary_swaps(
             my_team_df,  # Pass the original current team
             initial_available_for_purchase_df,  # Pass the initial available pool
@@ -1053,12 +1058,12 @@ def suggest_target_based_double_swap(
     to make the overall 2-transfer operation budget-compliant and score-optimal.
     Assumes 2 transfers are available for this operation.
     """
-    print(f"\n--- Target-Based Double Swap Assistant ---")
+    print("\n--- Target-Based Double Swap Assistant ---")
     print(f"Attempting to swap OUT: {fixed_sell_id} for IN: {fixed_buy_id}")
 
     # --- 1. Validate fixed part of the swap ---
     if fixed_sell_id not in current_my_team_df["ID"].values:
-        print(f"Error: Asset to sell '{fixed_sell_id}' is not in your current team.")
+        logger.error("Asset to sell '%s' is not in your current team.", fixed_sell_id)
         return
 
     asset_to_sell_1 = (
@@ -1066,26 +1071,29 @@ def suggest_target_based_double_swap(
     )
 
     if not all_assets_df[all_assets_df["ID"] == fixed_buy_id]["Active"].any():
-        print(
-            f"Error: Target asset to buy '{fixed_buy_id}' is not active or does not exist."
+        logger.error(
+            "Target asset to buy '%s' is not active or does not exist.", fixed_buy_id
         )
-        return
+        return 1
 
     asset_to_buy_1 = (
         all_assets_df[all_assets_df["ID"] == fixed_buy_id].iloc[0].to_dict()
     )
 
     if asset_to_sell_1["Type"] != asset_to_buy_1["Type"]:
-        print(
-            f"Error: Asset types do not match for the fixed swap ({asset_to_sell_1['Type']} vs {asset_to_buy_1['Type']})."
+        logger.error(
+            "Asset types do not match for the fixed swap (%s vs %s).",
+            asset_to_sell_1["Type"],
+            asset_to_buy_1["Type"],
         )
-        return
+        return 1
 
     if fixed_buy_id in current_my_team_df["ID"].values:
-        print(
-            f"Error: Target asset to buy '{fixed_buy_id}' is already on your team (cannot swap for itself)."
+        logger.error(
+            "Target asset to buy '%s' is already on your team (cannot swap for itself).",
+            fixed_buy_id,
         )
-        return
+        return 1
 
     print(
         f"Fixed Part 1: Sell {asset_to_sell_1['Name']} (Price ${asset_to_sell_1['Price']:.1f}M, Score {asset_to_sell_1['Combined_Score']:.2f})"
@@ -1276,7 +1284,6 @@ def display_suggestions(suggestion_list, suggestion_type_name, dynamic_budget=No
         return
 
     if suggestion_type_name == "Mandatory Replacements":
-        # ... (your existing mandatory replacements display logic) ...
         for i, suggestion_group in enumerate(suggestion_list):
             asset_to_sell = suggestion_group["sell"]
             options = suggestion_group["options"]
@@ -1307,7 +1314,6 @@ def display_suggestions(suggestion_list, suggestion_type_name, dynamic_budget=No
                 print("   No replacement options found.")
 
     elif suggestion_type_name == "Discretionary Single Swaps":
-        # ... (your existing discretionary single swaps display logic - this should already be up-to-date) ...
         title_cap_info = (
             f" (Team Budget Cap: ${dynamic_budget:.2f}M)"
             if dynamic_budget is not None
@@ -1319,29 +1325,29 @@ def display_suggestions(suggestion_list, suggestion_type_name, dynamic_budget=No
 
         for i, swap in enumerate(suggestion_list):
 
-            def format_value(val_key, precision=2, default_val="N/A"):
-                val = swap.get(val_key)
+            def format_value(data_dict, val_key, precision=2, default_val="N/A"):
+                val = data_dict.get(val_key)
                 if isinstance(val, (int, float)) and not np.isnan(
                     val
                 ):  # Check for NaN too
                     return f"{val:.{precision}f}"
                 return default_val
 
-            sell_score_display = format_value("sell_score", 2)
-            buy_score_display = format_value("buy_score", 2)
-            improvement_score_display = format_value("improvement_score", 2)
+            sell_score_display = format_value(swap, "sell_score", 2)
+            buy_score_display = format_value(swap, "buy_score", 2)
+            improvement_score_display = format_value(swap, "improvement_score", 2)
 
-            sell_avg_raw_display = format_value("sell_avg_points_raw", 2)
-            buy_avg_raw_display = format_value("buy_avg_points_raw", 2)
+            sell_avg_raw_display = format_value(swap, "sell_avg_points_raw", 2)
+            buy_avg_raw_display = format_value(swap, "buy_avg_points_raw", 2)
 
-            sell_last_race_raw_display = format_value("sell_last_race_raw", 1)
-            buy_last_race_raw_display = format_value("buy_last_race_raw", 1)
+            sell_last_race_raw_display = format_value(swap, "sell_last_race_raw", 1)
+            buy_last_race_raw_display = format_value(swap, "buy_last_race_raw", 1)
 
-            sell_total_pts_raw_display = format_value("sell_total_points_raw", 1)
-            buy_total_pts_raw_display = format_value("buy_total_points_raw", 1)
+            sell_total_pts_raw_display = format_value(swap, "sell_total_points_raw", 1)
+            buy_total_pts_raw_display = format_value(swap, "buy_total_points_raw", 1)
 
-            sell_trend_raw_display = format_value("sell_trend_raw", 1)
-            buy_trend_raw_display = format_value("buy_trend_raw", 1)
+            sell_trend_raw_display = format_value(swap, "sell_trend_raw", 1)
+            buy_trend_raw_display = format_value(swap, "buy_trend_raw", 1)
 
             print(
                 f"\n{i+1}. Swap Out: {swap.get('sell_name','N/A')} (ID: {swap.get('sell_id','N/A')}, Price: ${swap.get('sell_price',0):.1f}M, Score: {sell_score_display}, AvgL3: {sell_avg_raw_display}, LastR: {sell_last_race_raw_display}, TotPts: {sell_total_pts_raw_display}, Trend: {sell_trend_raw_display})"
@@ -1404,7 +1410,7 @@ def display_suggestions(suggestion_list, suggestion_type_name, dynamic_budget=No
             print(
                 f"   Combined Sell Price: ${swap_pair.get('sell_pair_price', 0):.1f}M"
             )
-            print(f"   Buy Pair:")
+            print("   Buy Pair:")
             print(f"   In:  {format_asset_details_for_double_swap(b1)}")
             print(f"   In:  {format_asset_details_for_double_swap(b2)}")
             print(f"   Combined Buy Price: ${swap_pair.get('buy_pair_price', 0):.1f}M")
@@ -1431,7 +1437,7 @@ def display_all_asset_stats(all_assets_df):
     Type column is omitted from display. Inactive assets are listed last.
     """
     if all_assets_df is None or all_assets_df.empty:
-        print("\nNo asset data available to display.")
+        logger.error("No asset data available to display.")
         return
 
     print("\n--- All Asset Statistics ---")
@@ -1542,7 +1548,7 @@ def optimize_wildcard_team(
     # active_assets = active_assets[active_assets['Price'] <= budget] # Further prune (solver handles budget constraint)
 
     if active_assets.empty:
-        print("No active assets available for optimization.")
+        logger.warning("No active assets available for optimization.")
         return
 
     # Create the LP problem
@@ -1665,13 +1671,14 @@ def optimize_limitless_team(all_assets_df, num_drivers_req=5, num_constructors_r
     )
 
     if all_assets_df is None or all_assets_df.empty:
-        print("Asset data is not available. Cannot optimize limitless team.")
+        logger.error("Asset data is not available. Cannot optimize limitless team.")
         return
 
     active_assets = all_assets_df[all_assets_df["Active"]].copy()
     if "Combined_Score" not in active_assets.columns:
-        print(
-            "Error: 'Combined_Score' not found in asset data. Please ensure data is processed correctly."
+        logger.error(
+            "'%s' not found in asset data. Please ensure data is processed correctly.",
+            "Combined_Score",
         )
         return
 
@@ -1691,11 +1698,13 @@ def optimize_limitless_team(all_assets_df, num_drivers_req=5, num_constructors_r
         len(limitless_drivers) < num_drivers_req
         or len(limitless_constructors) < num_constructors_req
     ):
-        print(
-            "\nWarning: Not enough active drivers or constructors available to form a full limitless team."
+        logger.warning(
+            "Not enough active drivers or constructors available to form a full limitless team."
         )
-        print(
-            f"Found {len(limitless_drivers)} drivers and {len(limitless_constructors)} constructors."
+        logger.warning(
+            "Found %d drivers and %d constructors.",
+            len(limitless_drivers),
+            len(limitless_constructors),
         )
 
     limitless_team_df = pd.concat(
@@ -1704,7 +1713,7 @@ def optimize_limitless_team(all_assets_df, num_drivers_req=5, num_constructors_r
 
     print(f"\n--- Optimal Limitless Team (Ignoring Budget) ---")
     if limitless_team_df.empty:
-        print(
+        logger.warning(
             "Could not form a limitless team (no active assets found or criteria not met)."
         )
         return
@@ -1816,17 +1825,47 @@ def configure_argparse():
     return parser
 
 
-def main():
+def configure_logging():
+    # --- Logger Setup ---
+    logger.setLevel(logging.INFO)  # Set default logging level for your logger
+    # Create console handler
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.INFO)  # Or set a different level for console output
+    # Create formatter
+    formatter = logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    # Add formatter to ch
+    ch.setFormatter(formatter)
+    # Add ch to logger
+    if not logger.handlers:  # Avoid adding multiple handlers if main() is called again
+        logger.addHandler(ch)
 
-    args = configure_argparse().parse_args()
+    # Optional: Add a FileHandler to log to a file
+    # try:
+    #     file_handler = logging.FileHandler('f1_fantasy_assistant.log', mode='a') # Append mode
+    #     file_handler.setFormatter(formatter)
+    #     file_handler.setLevel(logging.DEBUG) # Log more details to file
+    #     logger.addHandler(file_handler)
+    # except Exception as e:
+    #     logger.error(f"Failed to set up file logging: {e}")
+
+
+def main():
+    configure_logging()  # Set up logging
+    logger.info("Starting F1 Fantasy Assistant")
+
+    parser = configure_argparse()
+    args = parser.parse_args()
 
     # --- Use selected profile ---
     selected_profile_name = args.profile
     selected_weights = config.WEIGHT_PROFILES.get(
         selected_profile_name, config.WEIGHT_PROFILES["balanced"]
     )
-    print(
-        f"Using '{selected_profile_name.replace('_', ' ').title()}' weighting profile."
+    logger.info(
+        "Using '%s' weighting profile.", selected_profile_name.replace("_", " ").title()
     )
 
     # --- Data Loading ---
@@ -1838,8 +1877,8 @@ def main():
     )
 
     if all_assets_df is None:
-        print("Exiting due to critical error in loading asset data.")
-        return
+        logger.error("Exiting due to critical error in loading asset data.")
+        return 1
 
     # --- Mode Execution ---
     dynamic_budget = args.budget  # Use budget from args, defaults to INITIAL_BUDGET
@@ -1858,19 +1897,21 @@ def main():
             config.MY_TEAM_URL
             and config.MY_TEAM_URL != "YOUR_GOOGLE_SHEET_URL_FOR_MY_TEAM_CSV"
         ):
-            print(
-                f"\nWarning: Could not load team data from {config.MY_TEAM_URL}. Mode '{args.mode}' requires team data."
+            logger.error(
+                "Could not load team data from %s. Mode '%s' requires team data.",
+                config.MY_TEAM_URL,
+                args.mode,
             )
-            return
+            return 1
 
-    print(f"\nExecuting Mode: {args.mode.replace('_', ' ').title()}")
+    logger.info("Executing Mode: %s", args.mode.replace("_", " ").title())
 
     if args.mode == "weekly":
         if my_team_df is None or my_team_df.empty:
-            print(
+            logger.error(
                 "Cannot proceed with weekly transfers: Team data is missing or empty."
             )
-            return
+            return 1
         mandatory_transfers_df = identify_mandatory_transfers(my_team_df)
         num_mandatory_transfers = len(mandatory_transfers_df)
 
@@ -1892,10 +1933,10 @@ def main():
 
     elif args.mode == "target_swap":
         if my_team_df is None or my_team_df.empty:
-            print(
+            logger.error(
                 "Cannot proceed with target-based swap: Team data is missing or empty."
             )
-            return
+            return 1
 
         if not args.sell_id or not args.buy_id:
             parser.error(
@@ -1926,7 +1967,10 @@ def main():
         display_all_asset_stats(all_assets_df)
 
     else:  # Should be caught by argparse choices, but as a fallback
-        print("Invalid mode choice selected via arguments. Exiting.")
+        logger.error(
+            "Invalid mode choice selected via arguments: %s. Exiting.", args.mode
+        )
+        return 1
 
 
 if __name__ == "__main__":
