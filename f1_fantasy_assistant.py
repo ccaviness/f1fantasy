@@ -66,6 +66,30 @@ WEIGHT_PROFILES = {
     },
 }
 
+COLUMN_NAME_ABBREVIATIONS = {
+    "ID": "ID", # Keep short ones as is or slightly adjust if needed
+    "Name": "Name",
+    "Type": "Type", # Though we often omit this in final display
+    "Constructor": "Team", # Assuming 'Constructor' column holds the F1 Team name
+    "Price": "Price",
+    "Active": "Active",
+    "Purchase_Price": "PurchPr",
+    "Total_Points_So_Far": "TotPts",
+    "Avg_Points_Last_3_Races": "AvgL3",
+    "User_Adjusted_Avg_Points_Last_3_Races": "AdjAvgL3",
+    "Point_Adjustment_Avg3Races": "AdjVal",
+    "Points_Last_Race": "LastR",
+    "Trend_Score": "Trend",
+    "PPM_Current": "PPM_Cur",
+    "PPM_on_Purchase": "PPM_Pur",
+    "Combined_Score": "Score",
+    "Norm_User_Adjusted_Avg_Points_Last_3": "N_AvgL3",
+    "Norm_Points_Last_Race": "N_LastR",
+    "Norm_PPM": "N_PPM",
+    "Norm_Total_Points_So_Far": "N_TotPts",
+    "Norm_Trend_Score": "N_Trend"
+}
+
 
 def _load_raw_asset_df(asset_data_url):  # Parameter changed
     """Loads and performs initial validation on asset_data from a URL."""
@@ -477,7 +501,8 @@ def _load_and_process_team_df(team_url, all_assets_df_processed):  # Parameter c
 
 def load_and_process_data(
     asset_data_url, team_url, adjustments_url, selected_weights
-):  # Parameters changed
+):
+    """Main function to load and process asset data, team data, and adjustments."""
     overall_warnings = []
 
     # 1. Load and validate raw asset data
@@ -1446,8 +1471,9 @@ def display_suggestions(suggestion_list, suggestion_type_name, dynamic_budget=No
 
 def display_all_asset_stats(all_assets_df):
     """
-    Displays a table of calculated statistics for all assets, sorted by
-    Type and then by Combined_Score.
+    Displays a table of calculated statistics for all assets,
+    separating Drivers and Constructors, and sorting them.
+    Type column is omitted from display. Inactive assets are listed last.
     """
     if all_assets_df is None or all_assets_df.empty:
         print("\nNo asset data available to display.")
@@ -1455,12 +1481,11 @@ def display_all_asset_stats(all_assets_df):
 
     print("\n--- All Asset Statistics ---")
 
-    # Define the columns you want to see in this overview
-    # This can be adjusted to your preference
+    # Define the columns you want to see, EXCLUDING 'Type'
+    # 'Active' column is kept to show status.
     cols_to_display = [
         "ID",
         "Name",
-        "Type",
         "Constructor",
         "Price",
         "Active",
@@ -1472,7 +1497,7 @@ def display_all_asset_stats(all_assets_df):
         "Trend_Score",
         "PPM_Current",
         "Combined_Score",
-        # Optionally, add normalized components if you want to see them:
+        # You can add normalized components here if desired for a very detailed view
         # 'Norm_User_Adjusted_Avg_Points_Last_3', 'Norm_Points_Last_Race',
         # 'Norm_PPM', 'Norm_Total_Points_So_Far', 'Norm_Trend_Score'
     ]
@@ -1482,28 +1507,52 @@ def display_all_asset_stats(all_assets_df):
         col for col in cols_to_display if col in all_assets_df.columns
     ]
 
-    # Sort for better readability: e.g., by Type, then by Combined_Score descending
-    # Create a temporary sort key for 'Driver' then 'Constructor'
-    sorter_type = ["Driver", "Constructor"]
-    all_assets_df["Type_Sort"] = pd.Categorical(
-        all_assets_df["Type"], categories=sorter_type, ordered=True
-    )
+    # Set pandas display options to show all rows and customize float format
+    # These are set once before printing both tables
+    pd.set_option("display.max_rows", None)
+    pd.set_option("display.width", 120)  # Adjust width to see more columns if needed
+    pd.set_option("display.max_colwidth", None)  # Adjust colwidth if needed
+    pd.set_option("display.float_format", "{:.2f}".format)
 
-    sorted_assets_df = all_assets_df.sort_values(
-        by=["Type_Sort", "Combined_Score"], ascending=[True, False]
-    )
-    sorted_assets_df = sorted_assets_df.drop(columns=["Type_Sort"])  # Clean up sort key
+    # --- Process and Display Drivers ---
+    drivers_df = all_assets_df[all_assets_df["Type"] == "Driver"].copy()
+    if not drivers_df.empty:
+        # Sort by Active (True first, so False is descending), then by Combined_Score (descending)
+        drivers_df_sorted = drivers_df.sort_values(
+            by=["Active", "Combined_Score"],
+            ascending=[False, False],  # Active=True first, then highest Combined_Score
+        )
+        print("\n--- Driver Statistics ---")
+        print(
+            drivers_df_sorted[actual_display_cols].to_string(index=False, na_rep="N/A")
+        )
+    else:
+        print("\n--- Driver Statistics ---")
+        print("No driver data to display.")
 
-    # Set pandas display options to show all rows and customize float format if needed
-    pd.set_option("display.max_rows", None)  # Show all rows
-    pd.set_option(
-        "display.float_format", "{:.2f}".format
-    )  # Format floats to 2 decimal places
+    # --- Process and Display Constructors ---
+    constructors_df = all_assets_df[all_assets_df["Type"] == "Constructor"].copy()
+    if not constructors_df.empty:
+        # Sort by Active (True first), then by Combined_Score (descending)
+        constructors_df_sorted = constructors_df.sort_values(
+            by=["Active", "Combined_Score"],
+            ascending=[False, False],  # Active=True first, then highest Combined_Score
+        )
+        print("\n--- Constructor Statistics ---")
+        print(
+            constructors_df_sorted[actual_display_cols].to_string(
+                index=False, na_rep="N/A"
+            )
+        )
+    else:
+        print("\n--- Constructor Statistics ---")
+        print("No constructor data to display.")
 
-    print(sorted_assets_df[actual_display_cols].to_string(index=False, na_rep="N/A"))
-
-    pd.reset_option("display.max_rows")  # Reset to default
-    pd.reset_option("display.float_format")  # Reset to default
+    # Reset pandas display options to default
+    pd.reset_option("display.max_rows")
+    pd.reset_option("display.width")
+    pd.reset_option("display.max_colwidth")
+    pd.reset_option("display.float_format")
 
 
 def normalize_series(series):
