@@ -83,11 +83,11 @@ COLUMN_NAME_ABBREVIATIONS = {
     "PPM_Current": "PPM_Cur",
     "PPM_on_Purchase": "PPM_Pur",
     "Combined_Score": "Score",
-    "Norm_User_Adjusted_Avg_Points_Last_3": "N_AvgL3",
-    "Norm_Points_Last_Race": "N_LastR",
-    "Norm_PPM": "N_PPM",
-    "Norm_Total_Points_So_Far": "N_TotPts",
-    "Norm_Trend_Score": "N_Trend",
+    "Norm_User_Adjusted_Avg_Points_Last_3": "N:AvgL3",
+    "Norm_Points_Last_Race": "N:LastR",
+    "Norm_PPM": "N:PPM",
+    "Norm_Total_Points_So_Far": "N:TotPts",
+    "Norm_Trend_Score": "N:Trend",
 }
 
 
@@ -445,7 +445,6 @@ def _load_and_process_team_df(team_url, all_assets_df_processed):  # Parameter c
             how="left",
         )
 
-        # ... (the rest of your existing logic for defaulting Purchase_Price if it was missing, calculating PPM_on_Purchase, and filling NaNs) ...
         if my_team_df is not None and not my_team_df.empty:
             if purchase_price_was_missing_in_file:
                 if "Price" in my_team_df.columns:
@@ -477,10 +476,8 @@ def _load_and_process_team_df(team_url, all_assets_df_processed):  # Parameter c
                 my_team_df["PPM_on_Purchase"].replace([np.inf, -np.inf], 0).fillna(0)
             )
 
-            # ... (your NaNs filling logic for other columns)
             if my_team_df.isnull().values.any():
                 warnings += "\nWarning: Some assets in your team file may have missing details after merge."
-                # ... (your existing fillna loop)
 
         elif my_team_df is not None and my_team_df.empty:
             warnings += f"\nWarning: Team data is empty after merge (check IDs in team data from {team_url})."
@@ -597,6 +594,8 @@ def display_team_and_budget_info(team_df, initial_budget, budget_warning_message
             "PPM_on_Purchase",
             "Active",
             "Combined_Score",
+                    'Norm_User_Adjusted_Avg_Points_Last_3', 'Norm_Points_Last_Race',
+        'Norm_PPM', 'Norm_Total_Points_So_Far', 'Norm_Trend_Score'
         ]
         actual_display_cols = [
             col for col in cols_to_display_original_names if col in team_df.columns
@@ -1519,6 +1518,11 @@ def display_all_asset_stats(all_assets_df):
         "Trend_Score",
         "PPM_Current",
         "Combined_Score",
+        "Norm_User_Adjusted_Avg_Points_Last_3",
+        "Norm_Points_Last_Race",
+        "Norm_PPM",
+        "Norm_Total_Points_So_Far",
+        "Norm_Trend_Score",
     ]
 
     # Filter for columns that actually exist in all_assets_df
