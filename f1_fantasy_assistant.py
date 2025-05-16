@@ -8,11 +8,8 @@ import numpy as np
 
 # --- Configuration ---
 INITIAL_BUDGET = 100.0  # Standard initial budget in F1 Fantasy (in millions)
-ASSET_DATA_FILE = "asset_data.csv"
 ASSET_DATA_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRN0cf_B_U3KoYRAdCbiWrxxEplWZxiy0WQ6KIImEJ4E7mh147bDD5kSUsnDbGYFNChs6FNFQyfQThl/pub?gid=1838985806&single=true&output=csv"
-MY_TEAM_FILE = "my_team.csv"
 MY_TEAM_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRN0cf_B_U3KoYRAdCbiWrxxEplWZxiy0WQ6KIImEJ4E7mh147bDD5kSUsnDbGYFNChs6FNFQyfQThl/pub?gid=2095757091&single=true&output=csv"
-MANUAL_ADJUSTMENTS_FILE = "manual_adjustments.csv"
 MANUAL_ADJUSTMENTS_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRN0cf_B_U3KoYRAdCbiWrxxEplWZxiy0WQ6KIImEJ4E7mh147bDD5kSUsnDbGYFNChs6FNFQyfQThl/pub?gid=1943142711&single=true&output=csv"
 
 # Define the expected metadata columns in asset_data.csv
@@ -1415,6 +1412,68 @@ def display_suggestions(suggestion_list, suggestion_type_name, dynamic_budget=No
             )
 
 
+def display_all_asset_stats(all_assets_df):
+    """
+    Displays a table of calculated statistics for all assets, sorted by
+    Type and then by Combined_Score.
+    """
+    if all_assets_df is None or all_assets_df.empty:
+        print("\nNo asset data available to display.")
+        return
+
+    print("\n--- All Asset Statistics ---")
+
+    # Define the columns you want to see in this overview
+    # This can be adjusted to your preference
+    cols_to_display = [
+        "ID",
+        "Name",
+        "Type",
+        "Constructor",
+        "Price",
+        "Active",
+        "Total_Points_So_Far",
+        "Avg_Points_Last_3_Races",
+        "User_Adjusted_Avg_Points_Last_3_Races",
+        "Point_Adjustment_Avg3Races",
+        "Points_Last_Race",
+        "Trend_Score",
+        "PPM_Current",
+        "Combined_Score",
+        # Optionally, add normalized components if you want to see them:
+        # 'Norm_User_Adjusted_Avg_Points_Last_3', 'Norm_Points_Last_Race',
+        # 'Norm_PPM', 'Norm_Total_Points_So_Far', 'Norm_Trend_Score'
+    ]
+
+    # Filter for columns that actually exist in all_assets_df to avoid KeyErrors
+    actual_display_cols = [
+        col for col in cols_to_display if col in all_assets_df.columns
+    ]
+
+    # Sort for better readability: e.g., by Type, then by Combined_Score descending
+    # Create a temporary sort key for 'Driver' then 'Constructor'
+    sorter_type = ["Driver", "Constructor"]
+    all_assets_df["Type_Sort"] = pd.Categorical(
+        all_assets_df["Type"], categories=sorter_type, ordered=True
+    )
+
+    sorted_assets_df = all_assets_df.sort_values(
+        by=["Type_Sort", "Combined_Score"], ascending=[True, False]
+    )
+    sorted_assets_df = sorted_assets_df.drop(columns=["Type_Sort"])  # Clean up sort key
+
+    # Set pandas display options to show all rows and customize float format if needed
+    pd.set_option("display.max_rows", None)  # Show all rows
+    pd.set_option(
+        "display.float_format", "{:.2f}".format
+    )  # Format floats to 2 decimal places
+
+    print(sorted_assets_df[actual_display_cols].to_string(index=False, na_rep="N/A"))
+
+    pd.reset_option("display.max_rows")  # Reset to default
+    pd.reset_option("display.float_format")  # Reset to default
+
+
 def normalize_series(series):
     """Normalizes a pandas Series to a 0-1 scale."""
     min_val = series.min()
@@ -1636,11 +1695,11 @@ def optimize_limitless_team(all_assets_df, num_drivers_req=5, num_constructors_r
 
 
 def main():
-    # Ensure selected_weights is defined properly from profile selection
-    # For example, if using profile_options and profile_choice_idx:
-    profile_options = list(WEIGHT_PROFILES.keys())  # Defined globally
+    # --- Profile Selection ---
+    # (Your existing profile selection logic here - ensure selected_weights is defined)
+    profile_options = list(WEIGHT_PROFILES.keys())
     default_profile_name = "balanced"
-    selected_profile_name = default_profile_name  # Default
+    selected_profile_name = default_profile_name
 
     print("\n--- Select Weighting Profile for Combined_Score ---")
     for i, name in enumerate(profile_options):
@@ -1663,55 +1722,64 @@ def main():
     except ValueError:
         print(f"Invalid input. Using default '{default_profile_name.title()}' profile.")
 
-    selected_weights = WEIGHT_PROFILES.get(
-        selected_profile_name, WEIGHT_PROFILES[default_profile_name]
-    )  # Use .get for safety
-
+    selected_weights = WEIGHT_PROFILES[selected_profile_name]
     print(f"Using '{selected_profile_name.replace('_', ' ').title()}' profile.")
 
+    # --- Data Loading ---
+    # For "All Asset Stats" mode, we don't strictly need my_team.csv, but load_and_process_data
+    # is set up to handle its absence gracefully. It's easier to always call it the same way.
+    # Manual adjustments will still apply if the file is present.
     all_assets_df, my_team_df, warning_msg = load_and_process_data(
-        ASSET_DATA_URL, MY_TEAM_URL, MANUAL_ADJUSTMENTS_URL, selected_weights
+        ASSET_DATA_URL,  # Using URL constants
+        MY_TEAM_URL,  # Using URL constants
+        MANUAL_ADJUSTMENTS_URL,  # Using URL constants
+        selected_weights,
     )
 
     if all_assets_df is None:
-        print("Exiting due to critical error in data loading.")
+        print("Exiting due to critical error in loading asset data.")
         return
 
-    dynamic_budget = INITIAL_BUDGET
-    current_team_value = 0.0
-    if my_team_df is not None and not my_team_df.empty:
-        dynamic_budget, current_team_value = display_team_and_budget_info(
-            my_team_df, INITIAL_BUDGET, warning_msg
-        )
-    elif MY_TEAM_FILE:
-        # This part of the log is now handled inside load_and_process_data if team file fails
-        # print(f"\nWarning: Could not load team data from {MY_TEAM_FILE}. Some modes will be unavailable.")
-        pass
-
+    # --- Mode Selection ---
     print("\nChoose mode:")
     print("1. Weekly Transfer Suggestions (Automated)")
     print("2. Wildcard Team Optimizer (Budgeted)")
     print("3. Target-Based Double Transfer Assistant")
-    print("4. Limitless Chip Optimizer (No Budget)")  # New Option
+    print("4. Limitless Chip Optimizer (No Budget)")
+    print("5. Display All Asset Stats")  # New Option
 
-    mode_choice = input("Enter choice (1-4, default: 1): ") or "1"  # Default to 1
+    mode_choice = input("Enter choice (1-5, default: 1): ") or "1"
+
+    # Common variables needed for some modes - initialize them
+    dynamic_budget = INITIAL_BUDGET  # Default if no team data
+    current_team_value = 0.0  # Default if no team data
+
+    if (
+        mode_choice != "5" and mode_choice != "2" and mode_choice != "4"
+    ):  # Modes that require team data and initial budget display
+        if my_team_df is not None and not my_team_df.empty:
+            dynamic_budget, current_team_value = display_team_and_budget_info(
+                my_team_df, INITIAL_BUDGET, warning_msg
+            )
+        elif (
+            MY_TEAM_URL and MY_TEAM_URL != "YOUR_GOOGLE_SHEET_URL_FOR_MY_TEAM_CSV"
+        ):  # If a team URL was specified but loading failed
+            print(
+                f"\nWarning: Could not load team data from {MY_TEAM_URL}. Mode '{mode_choice}' requires team data."
+            )
+            return  # Exit if mode requires team data and it's missing
 
     if mode_choice == "1":
-        if my_team_df is None or my_team_df.empty:
+        if my_team_df is None or my_team_df.empty:  # Redundant check, but safe
             print(
                 "Cannot proceed with weekly transfers: Team data is missing or empty."
             )
             return
-        # ... (existing weekly transfer logic calls display_team_and_budget_info if not already called)
-        # We already called display_team_and_budget_info if my_team_df was loaded.
-        # If it wasn't (e.g. my_team.csv missing), then this mode can't run.
-
         mandatory_transfers_df = identify_mandatory_transfers(my_team_df)
         num_mandatory_transfers = len(mandatory_transfers_df)
         # ... (rest of your existing mode '1' logic for calling suggest_swaps) ...
-        print(
-            f"\nYou have {num_mandatory_transfers} mandatory transfer(s)."
-        )  # Duplicated from suggest_swaps context, can be streamlined
+        # This print block is fine here as it's specific to this mode's context
+        print(f"\nYou have {num_mandatory_transfers} mandatory transfer(s).")
         print(
             f"The system will consider up to {DEFAULT_FREE_TRANSFERS} total transfers based on a team budget cap of ${dynamic_budget:.2f}M."
         )
@@ -1726,7 +1794,7 @@ def main():
         )
 
     elif mode_choice == "2":
-        optimize_wildcard_team(all_assets_df, INITIAL_BUDGET)  # Budgeted wildcard
+        optimize_wildcard_team(all_assets_df, INITIAL_BUDGET)
 
     elif mode_choice == "3":
         if my_team_df is None or my_team_df.empty:
@@ -1734,7 +1802,8 @@ def main():
                 "Cannot proceed with target-based swap: Team data is missing or empty."
             )
             return
-        # ... (your existing target-based swap logic, ensure dynamic_budget and current_team_value are used) ...
+        # display_team_and_budget_info was already called if my_team_df is valid
+        # ... (your existing target-based swap logic) ...
         print("\n--- Target-Based Double Transfer Input ---")
         fixed_sell_id = (
             input(
@@ -1748,7 +1817,6 @@ def main():
             .strip()
             .upper()
         )
-
         if fixed_sell_id and fixed_buy_id:
             suggest_target_based_double_swap(
                 fixed_sell_id,
@@ -1759,12 +1827,14 @@ def main():
                 current_team_value,
             )
         else:
-            print(
-                "Both asset IDs (sell and buy) must be provided for target-based swap."
-            )
+            print("Both asset IDs (sell and buy) must be provided.")
 
-    elif mode_choice == "4":  # New mode
+    elif mode_choice == "4":
         optimize_limitless_team(all_assets_df)
+
+    elif mode_choice == "5":  # New mode
+        display_all_asset_stats(all_assets_df)
+
     else:
         print("Invalid mode choice. Exiting.")
 
