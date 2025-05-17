@@ -1106,26 +1106,174 @@ def _suggest_true_double_discretionary_swaps(
     return []
 
 
-def suggest_swaps(
-    all_assets_df,
-    my_team_df,
-    mandatory_transfers_df,
-    dynamic_budget,
-    current_team_value,
-    num_total_transfers_allowed,
-    num_mandatory_transfers,
-):
+# Ensure itertools is imported at the top of your script
+# import itertools
+
+
+def _suggest_true_triple_discretionary_swaps(
+    current_my_team_df: pd.DataFrame,
+    initial_available_for_purchase_df: pd.DataFrame,
+    all_assets_df_complete: pd.DataFrame,
+    dynamic_budget: float,
+    initial_current_team_value: float,
+) -> list:
     """
-    Orchestrates swap suggestions by calling helper functions.
+    Suggests true triple swaps (3 out, 3 in) if beneficial.
+    """
+    logger.info("Calculating true triple discretionary swaps...")
+    true_triple_swap_suggestions = []
+
+    active_team_members_df = current_my_team_df[current_my_team_df["Active"]].copy()
+
+    if len(active_team_members_df) < 3:
+        logger.info("Not enough active players on team to perform a triple swap.")
+        return []
+
+    budget_headroom = dynamic_budget - initial_current_team_value
+
+    # Iterate through all unique combinations of three assets to sell
+    for s1_details, s2_details, s3_details in itertools.combinations(
+        active_team_members_df.to_dict("records"), 3
+    ):
+        sell_triple_ids = {s1_details["ID"], s2_details["ID"], s3_details["ID"]}
+        sell_triple_price = (
+            s1_details["Price"] + s2_details["Price"] + s3_details["Price"]
+        )
+        sell_triple_combined_score = (
+            s1_details["Combined_Score"]
+            + s2_details["Combined_Score"]
+            + s3_details["Combined_Score"]
+        )
+
+        # Determine types needed for replacements
+        types_to_sell = sorted(
+            [s1_details["Type"], s2_details["Type"], s3_details["Type"]]
+        )  # Sort for consistent handling if types are same
+
+        max_combined_buy_price = sell_triple_price + budget_headroom
+
+        # Filter available assets for candidates for B1, B2, B3
+        # Ensure candidates are not the ones being sold (already handled by initial_available_for_purchase_df)
+
+        # Get candidates for each slot based on type.
+        # This nested loop approach can be computationally intensive.
+        # We need to ensure B1, B2, B3 are distinct.
+
+        # For simplicity, let's assume we are buying assets matching the types sold.
+        # A more advanced version could try different type combinations if allowed by team structure (e.g. sell D,D,C -> buy D,D,C)
+
+        # This part needs careful construction of loops to get unique B1, B2, B3 of correct types
+        # For now, let's outline the structure for finding B1, B2, B3 matching types of S1, S2, S3 respectively.
+
+        # Potential B1 candidates (matching type of S1)
+        cand_b1_df = initial_available_for_purchase_df[
+            initial_available_for_purchase_df["Type"] == s1_details["Type"]
+        ].copy()
+
+        for _, b1_row in cand_b1_df.iterrows():
+            b1 = b1_row.to_dict()
+            if b1["Price"] > max_combined_buy_price:
+                continue  # Early exit if B1 alone is too expensive
+
+            # Potential B2 candidates (matching type of S2, not B1)
+            cand_b2_df = initial_available_for_purchase_df[
+                (initial_available_for_purchase_df["Type"] == s2_details["Type"])
+                & (initial_available_for_purchase_df["ID"] != b1["ID"])
+            ].copy()
+
+            for _, b2_row in cand_b2_df.iterrows():
+                b2 = b2_row.to_dict()
+                price_b1_b2 = b1["Price"] + b2["Price"]
+                if price_b1_b2 > max_combined_buy_price:
+                    continue
+
+                # Potential B3 candidates (matching type of S3, not B1 or B2)
+                max_price_for_b3 = max_combined_buy_price - price_b1_b2
+                if max_price_for_b3 < 0:
+                    continue
+
+                cand_b3_df = initial_available_for_purchase_df[
+                    (initial_available_for_purchase_df["Type"] == s3_details["Type"])
+                    & (initial_available_for_purchase_df["ID"] != b1["ID"])
+                    & (initial_available_for_purchase_df["ID"] != b2["ID"])
+                    & (initial_available_for_purchase_df["Price"] <= max_price_for_b3)
+                ].copy()
+
+                for _, b3_row in cand_b3_df.iterrows():
+                    b3 = b3_row.to_dict()
+
+                    buy_triple_price = (
+                        b1["Price"] + b2["Price"] + b3["Price"]
+                    )  # Should be <= max_combined_buy_price
+                    buy_triple_combined_score = (
+                        b1["Combined_Score"]
+                        + b2["Combined_Score"]
+                        + b3["Combined_Score"]
+                    )
+
+                    improvement_score = (
+                        buy_triple_combined_score - sell_triple_combined_score
+                    )
+
+                    if improvement_score > 0:
+                        new_team_total_value = (
+                            initial_current_team_value
+                            - sell_triple_price
+                            + buy_triple_price
+                        )
+                        money_left_under_cap = dynamic_budget - new_team_total_value
+
+                        true_triple_swap_suggestions.append(
+                            {
+                                "sell1": s1_details,
+                                "sell2": s2_details,
+                                "sell3": s3_details,
+                                "buy1": b1,
+                                "buy2": b2,
+                                "buy3": b3,
+                                "improvement_score": improvement_score,
+                                "new_team_value": new_team_total_value,
+                                "money_left_under_cap": money_left_under_cap,
+                                "sell_triple_price": sell_triple_price,
+                                "buy_triple_price": buy_triple_price,
+                            }
+                        )
+
+    if true_triple_swap_suggestions:
+        sorted_triple_swaps = sorted(
+            true_triple_swap_suggestions,
+            key=lambda x: x["improvement_score"],
+            reverse=True,
+        )
+        logger.info("Found %d potential true triple swaps.", len(sorted_triple_swaps))
+        return sorted_triple_swaps[:5]  # Return top 5
+
+    logger.info("No beneficial true triple swaps found.")
+    return []
+
+
+def suggest_swaps(
+    all_assets_df: pd.DataFrame,
+    my_team_df: pd.DataFrame,
+    mandatory_transfers_df: pd.DataFrame,
+    dynamic_budget: float,
+    current_team_value: float,
+    num_available_weekly_transfers: int,  # This is the raw number like 1, 2, or 3 from args.transfers
+    num_mandatory_transfers: int,
+) -> dict:
+    """
+    Orchestrates swap suggestions based on the number of available discretionary transfers.
     """
     suggestions = {
         "mandatory": [],
-        "discretionary_sequence": [],
-        "true_double_swaps": [],
+        "best_single_discretionary": [],  # For 1 transfer
+        "discretionary_sequence": [],  # For N sequential single (can be 1, 2, or 3)
+        "true_double_swaps": [],  # For 2 transfers
+        "true_triple_swaps": [],  # For 3 transfers
     }
 
     if all_assets_df is None or my_team_df is None or my_team_df.empty:
-        logger.warning("Cannot generate suggestions: missing asset data or team data.")
+        logger.error("Cannot generate suggestions: missing asset data or team data.")
         return suggestions
 
     owned_ids = list(my_team_df["ID"])
@@ -1135,7 +1283,7 @@ def suggest_swaps(
 
     # --- 1. Handle Mandatory Transfers ---
     if num_mandatory_transfers > 0:
-        print("\n--- Suggestions for Mandatory Replacements ---")
+        logger.info("--- Suggestions for Mandatory Replacements ---")
         mandatory_replacement_suggestions = _suggest_mandatory_replacements(
             mandatory_transfers_df,
             initial_available_for_purchase_df,
@@ -1148,55 +1296,103 @@ def suggest_swaps(
             display_suggestions(
                 suggestions["mandatory"], "Mandatory Replacements", dynamic_budget
             )
+        else:
+            logger.info("No suitable replacements found for mandatory transfers.")
 
     # --- 2. Determine available discretionary transfers ---
-    num_discretionary_transfers_available = (
-        num_total_transfers_allowed - num_mandatory_transfers
+    # This uses the user-provided number of transfers they intend to make this week
+    num_discretionary_to_suggest = (
+        num_available_weekly_transfers - num_mandatory_transfers
     )
 
-    # --- 3. Handle Sequential Discretionary Single Swaps ---
-    # We can still offer this, especially if only 1 discretionary transfer is available
-    if num_discretionary_transfers_available > 0:
-        print(
-            f"\n--- Sequential Suggestions for up to {num_discretionary_transfers_available} Discretionary Single Swap(s) (Using Combined Score) ---"
+    if num_discretionary_to_suggest <= 0:
+        logger.info(
+            "No discretionary transfers available or to suggest after mandatory ones."
         )
-        discretionary_sequence = _suggest_sequential_single_discretionary_swaps(
+        return suggestions
+
+    # --- 3. Generate Suggestions Based on Number of Discretionary Transfers ---
+    logger.info(
+        "Calculating suggestions for %d discretionary transfer(s).",
+        num_discretionary_to_suggest,
+    )
+
+    # Option A: Always show best single if possible
+    if num_discretionary_to_suggest >= 1:
+        logger.info("Calculating best single discretionary swap...")
+        best_single_swap = _suggest_sequential_single_discretionary_swaps(
             my_team_df,
             initial_available_for_purchase_df,
             all_assets_df,
             dynamic_budget,
             current_team_value,
-            num_discretionary_transfers_available,
+            1,  # Request exactly one
         )
-        suggestions["discretionary_sequence"] = discretionary_sequence
-        if suggestions["discretionary_sequence"]:
+        if best_single_swap:  # This function returns a list, check if it's non-empty
+            suggestions["best_single_discretionary"] = best_single_swap
             display_suggestions(
-                suggestions["discretionary_sequence"],
-                "Discretionary Single Swaps",
+                suggestions["best_single_discretionary"],
+                "Best Single Discretionary Swap",
                 dynamic_budget,
             )
-        # Message for no beneficial swaps is now inside _suggest_sequential_single_discretionary_swaps
+        else:
+            logger.info("No beneficial single discretionary swap found.")
 
-    # --- 4. Handle True Double Discretionary Swaps ---
-    # Only suggest double swaps if 2 discretionary transfers are actually available
-    if num_discretionary_transfers_available == 2:
-        print("\n--- Suggestions for True Double Swap (2 out, 2 in) ---")
-        double_swap_suggestions = _suggest_true_double_discretionary_swaps(
-            my_team_df,  # Pass the original current team
-            initial_available_for_purchase_df,  # Pass the initial available pool
-            all_assets_df,  # Pass the complete asset data for lookups
+    # Option B: Show "true" optimal for the exact number of transfers
+    if num_discretionary_to_suggest == 1:
+        # The 'best_single_discretionary' already covers this.
+        # Or, if you want the sequential to show its sequence for 1:
+        # suggestions['discretionary_sequence'] = best_single_swap (already done)
+        pass
+
+    if num_discretionary_to_suggest == 2:
+        logger.info("Calculating true double discretionary swaps...")
+        double_swaps = _suggest_true_double_discretionary_swaps(
+            my_team_df,
+            initial_available_for_purchase_df,
+            all_assets_df,
             dynamic_budget,
             current_team_value,
         )
-        suggestions["true_double_swaps"] = double_swap_suggestions
-        if suggestions["true_double_swaps"]:
+        if double_swaps:
+            suggestions["true_double_swaps"] = double_swaps
             display_suggestions(
                 suggestions["true_double_swaps"], "True Double Swaps", dynamic_budget
             )
         else:
-            print(
-                "No beneficial true double swaps found based on Combined Score and current budget."
+            logger.info("No beneficial true double swaps found.")
+
+    if num_discretionary_to_suggest == 3:
+        logger.info("Calculating true triple discretionary swaps...")
+        triple_swaps = _suggest_true_triple_discretionary_swaps(
+            my_team_df,
+            initial_available_for_purchase_df,
+            all_assets_df,
+            dynamic_budget,
+            current_team_value,
+        )
+        if triple_swaps:
+            suggestions["true_triple_swaps"] = triple_swaps
+            display_suggestions(
+                suggestions["true_triple_swaps"], "True Triple Swaps", dynamic_budget
             )
+        else:
+            logger.info("No beneficial true triple swaps found.")
+
+        # Optionally, also show the best sequential 3-single-swaps as an alternative for 3 transfers
+        # logger.info("Calculating best sequential triple (3x single) discretionary swaps...")
+        # seq_triple = _suggest_sequential_single_discretionary_swaps(
+        #     my_team_df, initial_available_for_purchase_df, all_assets_df,
+        #     dynamic_budget, current_team_value, 3
+        # )
+        # if seq_triple:
+        #     suggestions['discretionary_sequence_for_3'] = seq_triple # Different key
+        #     display_suggestions(suggestions['discretionary_sequence_for_3'], "Sequential Triple (3x Single) Discretionary Swaps", dynamic_budget)
+
+    # Fallback: If specific N-swap logic didn't run or yield results, show sequential for N transfers
+    # This part might become redundant if the above specific calls cover all cases.
+    # For now, if a specific N-swap was requested and produced results, that's the primary output.
+    # If only single was found when N > 1 was allowed, that's also fine.
 
     return suggestions
 
@@ -1582,6 +1778,70 @@ def display_suggestions(suggestion_list, suggestion_type_name, dynamic_budget=No
 
             new_team_val_str = f"{swap_pair.get('new_team_value', 0):.2f}"
             money_left_str = f"{swap_pair.get('money_left_under_cap', 0):.2f}"
+            print(
+                f"   Resulting Team Value: ${new_team_val_str}M / Money Left Under Cap: ${money_left_str}M"
+            )
+    elif suggestion_type_name == "True Triple Swaps":
+        title_cap_info = (
+            f" (Team Budget Cap: ${dynamic_budget:.2f}M)"
+            if dynamic_budget is not None
+            else ""
+        )
+        print(
+            f"\nTop {len(suggestion_list)} True Triple Swap Option(s){title_cap_info}:"
+        )
+
+        for i, swap_group in enumerate(suggestion_list):
+            s1 = swap_group.get("sell1", {})
+            s2 = swap_group.get("sell2", {})
+            s3 = swap_group.get("sell3", {})
+            b1 = swap_group.get("buy1", {})
+            b2 = swap_group.get("buy2", {})
+            b3 = swap_group.get("buy3", {})
+
+            # Re-use or adapt your asset formatting helper
+            def format_asset_details_for_triple_swap(asset_dict):
+                # (Similar to format_asset_details_for_double_swap, showing relevant raw scores)
+                def format_num(val_key, precision=1, default_str="N/A"):
+                    val = asset_dict.get(val_key)
+                    if isinstance(val, (int, float)) and not np.isnan(val):
+                        return f"{val:.{precision}f}"
+                    return default_str
+
+                name_id = f"{asset_dict.get('Name', 'N/A')} (ID: {asset_dict.get('ID', 'N/A')})"
+                price = f"Price: ${asset_dict.get('Price', 0):.1f}M"
+                score = f"Score: {asset_dict.get('Combined_Score', 0):.2f}"
+                avg_l3 = format_num("Avg_Points_Last_3_Races", 2)
+                last_r = format_num("Points_Last_Race", 1)
+                tot_pts = format_num("Total_Points_So_Far", 1)
+                trend = format_num("Trend_Score", 1)
+                return f"{name_id}, {price}, {score}, AvgL3: {avg_l3}, LastR: {last_r}, TotPts: {tot_pts}, Trend: {trend}"
+
+            print(f"\n{i+1}. Sell Triple:")
+            print(f"   Out: {format_asset_details_for_triple_swap(s1)}")
+            print(f"   Out: {format_asset_details_for_triple_swap(s2)}")
+            print(f"   Out: {format_asset_details_for_triple_swap(s3)}")
+            print(
+                f"   Combined Sell Price: ${swap_group.get('sell_triple_price', 0):.1f}M"
+            )
+            print(f"   Buy Triple:")
+            print(f"   In:  {format_asset_details_for_triple_swap(b1)}")
+            print(f"   In:  {format_asset_details_for_triple_swap(b2)}")
+            print(f"   In:  {format_asset_details_for_triple_swap(b3)}")
+            print(
+                f"   Combined Buy Price: ${swap_group.get('buy_triple_price', 0):.1f}M"
+            )
+
+            improvement_score_val = swap_group.get("improvement_score", 0)
+            improvement_score_str = (
+                f"{improvement_score_val:.2f}"
+                if isinstance(improvement_score_val, (int, float))
+                else "N/A"
+            )
+            print(f"   Combined Score Improvement: +{improvement_score_str}")
+
+            new_team_val_str = f"{swap_group.get('new_team_value', 0):.2f}"
+            money_left_str = f"{swap_group.get('money_left_under_cap', 0):.2f}"
             print(
                 f"   Resulting Team Value: ${new_team_val_str}M / Money Left Under Cap: ${money_left_str}M"
             )
@@ -2007,7 +2267,7 @@ def configure_argparse() -> argparse.ArgumentParser:
 
 def configure_logging(args: argparse.ArgumentParser):  # Added type hint and parameter
     """Configures logging for the application."""
-    log_level = logging.DEBUG 
+    log_level = logging.DEBUG
     if args.debug:
         log_level = logging.DEBUG  # Set to DEBUG if debug flag is enabled
     elif args.verbose:
