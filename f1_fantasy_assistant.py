@@ -1996,12 +1996,24 @@ def configure_argparse() -> argparse.ArgumentParser:
         action="store_true",
         help="Enable debug level logging for more detailed output.",
     )
+    optional_group.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Enable verbose level logging for more detailed output.",
+    )
     return parser
 
 
-def configure_logging(debug_enabled: bool):  # Added type hint and parameter
+def configure_logging(args: argparse.ArgumentParser):  # Added type hint and parameter
     """Configures logging for the application."""
-    log_level = logging.DEBUG if debug_enabled else logging.INFO
+    log_level = logging.DEBUG 
+    if args.debug:
+        log_level = logging.DEBUG  # Set to DEBUG if debug flag is enabled
+    elif args.verbose:
+        log_level = logging.INFO  # Set to INFO if verbose flag is enabled
+    else:
+        log_level = logging.WARNING  # Default to WARNING if neither is set
 
     # Get your named logger
     # logger = logging.getLogger('F1FantasyAssistant') # This is already global in your script
@@ -2011,8 +2023,6 @@ def configure_logging(debug_enabled: bool):  # Added type hint and parameter
     # Configure console handler (ch) if not already configured
     if not any(isinstance(h, logging.StreamHandler) for h in logger.handlers):
         ch = logging.StreamHandler()
-        # Set console handler level based on debug flag as well, or keep it INFO
-        # For now, let's make console also DEBUG if debug_enabled, otherwise INFO
         ch.setLevel(log_level)
         formatter = logging.Formatter(
             "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -2035,18 +2045,15 @@ def configure_logging(debug_enabled: bool):  # Added type hint and parameter
     # except Exception as e:
     #     logger.error("Failed to set up file logging: %s", e, exc_info=True)
 
-    if debug_enabled:
-        logger.info("Debug logging enabled.")
-    else:
-        logger.info("Standard logging (INFO level) enabled.")
+    logger.debug("Logging enabled at level: %s", logging.getLevelName(log_level))
 
 
 def main() -> int:
     parser = configure_argparse()
     args = parser.parse_args()
-    configure_logging(args.debug)
+    configure_logging(args)
 
-    logger.info("Starting F1 Fantasy Assistant")
+    print("Starting F1 Fantasy Assistant")
     logger.debug("Parsed arguments: %s", args)
 
     # --- Process Profile Argument using centralized map ---
