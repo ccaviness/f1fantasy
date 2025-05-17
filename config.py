@@ -26,7 +26,7 @@ METADATA_COLUMNS: list[str] = ["ID", "Name", "Type", "Constructor", "Price", "Ac
 """List of column names considered as metadata for assets."""
 
 # --- Gameplay Parameters ---
-DEFAULT_FREE_TRANSFERS: int = 3
+DEFAULT_FREE_TRANSFERS: int = 2
 """The default number of free transfers allowed per game period."""
 
 # --- Scoring Heuristic Configuration ---
